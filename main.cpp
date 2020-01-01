@@ -25,15 +25,11 @@
 #include <string.h>
 #include <stdarg.h>
 #include <ctype.h>
-#include <stdint.h>
 #include <inttypes.h>
 
 #define GETOPT_DONE    -1
 #define GETOPT_UNKNOWN -2
 #define GETOPT_MISSING -3
-#define MSG_MSG   1
-#define MSG_INFO  2
-#define MSG_DEBUG 3
 
 #define PAR_STREAM_SELECT  0x01
 #define PAR_STREAM_INVALID 0x02
@@ -44,21 +40,53 @@
 #define PAR_MODE_DEMUX 3
 
 #define MPEG_DEMUX_BUFFER 4096
-#define MPEG_END_CODE      0x01b9
-#define MPEG_PACK_START    0x01ba
-#define MPEG_SYSTEM_HEADER 0x01bb
-#define MPEG_PACKET_START  0x0001
 
-static FILE *fp[512];
+static constexpr uint16_t MPEG_END_CODE = 0x01b9;
+static constexpr uint16_t MPEG_PACK_START = 0x01ba;
+static constexpr uint16_t MPEG_SYSTEM_HEADER = 0x01bb;
+static constexpr uint16_t MPEG_PACKET_START = 0x0001;
 
 struct mpeg_buffer_t
 {
     uint8_t *buf;
-    unsigned cnt;
-    unsigned max;
+    uint32_t cnt;
+    uint32_t max;
 };
 
-static mpeg_buffer_t packet = { NULL, 0, 0 };
+struct mpeg_stream_info_t
+{
+    uint32_t packet_cnt;
+    uint64_t size;
+};
+
+struct mpeg_shdr_t
+{
+    unsigned size;
+    int fixed;
+    int csps;
+};
+
+struct mpeg_packet_t
+{
+    unsigned type;
+    unsigned sid;
+    unsigned ssid;
+    unsigned size;
+    unsigned offset;
+    char have_pts;
+    uint64_t pts;
+    char have_dts;
+    uint64_t dts;
+};
+
+struct mpeg_pack_t
+{
+    unsigned size;
+    unsigned type;
+    uint64_t scr;
+    uint32_t mux_rate;
+    uint32_t stuff;
+};
 
 struct mpegd_option_t
 {
@@ -69,42 +97,16 @@ struct mpegd_option_t
     const char *optdesc;
 };
 
-static unsigned msg_level = MSG_DEBUG;
+static mpeg_buffer_t packet = { NULL, 0, 0 };
+static FILE *fp[512];
 
-unsigned msg_get_level (void)
-{
-    return msg_level;
-}
-
-void prt_msg_va(unsigned level, const char *msg, va_list va)
-{
-    if (level <= msg_level) {
-        vfprintf (stderr, msg, va);
-        fflush (stderr);
-    }
-}
-
-void prt_err(const char *msg, ...)
+static void prt_msg(const char *msg, ...)
 {
     va_list va;
-
-    if (0 <= msg_level)
-    {
-        va_start (va, msg);
-        prt_msg_va(0, msg, va);
-        va_end (va);
-    }
-}
-
-void prt_msg(const char *msg, ...)
-{
-    va_list va;
-
-    if (MSG_MSG <= msg_level) {
-        va_start (va, msg);
-        prt_msg_va (MSG_MSG, msg, va);
-        va_end (va);
-    }
+    va_start(va, msg);
+    vfprintf(stderr, msg, va);
+    fflush(stderr);
+    va_end(va);
 }
 
 static int opt_cmp(const mpegd_option_t *opt1, const mpegd_option_t *opt2)
@@ -212,26 +214,31 @@ static void print_option(const mpegd_option_t *opt, unsigned w)
         printf ("  -%c", opt->name1);
         n += 2;
 
-        if (opt->name2 != NULL) {
+        if (opt->name2 != NULL)
+        {
             printf (", ");
             n += 2;
         }
     }
-    else {
+    else
+    {
         printf ("  ");
     }
 
-    if (opt->name2 != NULL) {
+    if (opt->name2 != NULL)
+    {
         printf ("--%s", opt->name2);
         n += 2 + strlen (opt->name2);
     }
 
-    if (opt->argdesc != NULL) {
+    if (opt->argdesc != NULL)
+    {
         printf (" %s", opt->argdesc);
         n += 1 + strlen (opt->argdesc);
     }
 
-    while (n < w) {
+    while (n < w)
+    {
         fputc (' ', stdout);
         n += 1;
     }
@@ -239,7 +246,8 @@ static void print_option(const mpegd_option_t *opt, unsigned w)
     printf ("%s\n", opt->optdesc);
 }
 
-void mpegd_getopt_help(const char *tag, const char *usage, mpegd_option_t *opt)
+static void
+mpegd_getopt_help(const char *tag, const char *usage, mpegd_option_t *opt)
 {
     sort_options(opt);
     unsigned w = opt_max_width (opt);
@@ -284,7 +292,8 @@ find_option_name2(mpegd_option_t *opt, const char *name2)
     return NULL;
 }
 
-int mpegd_getopt(int argc, char **argv, char ***optarg, mpegd_option_t *opt)
+static int
+mpegd_getopt(int argc, char **argv, char ***optarg, mpegd_option_t *opt)
 {
     mpegd_option_t *ret;
     static int atend = 0;
@@ -348,7 +357,7 @@ int mpegd_getopt(int argc, char **argv, char ***optarg, mpegd_option_t *opt)
                 fprintf (stderr, "%s: unknown option (%s)\n",
                     argv[0], curopt
                 );
-                return (GETOPT_UNKNOWN);
+                return GETOPT_UNKNOWN;
             }
 
             if ((index2 + ret->argcnt) > argc)
@@ -356,7 +365,7 @@ int mpegd_getopt(int argc, char **argv, char ***optarg, mpegd_option_t *opt)
                 fprintf (stderr, "%s: missing option argument (%s)\n",
                     argv[0], curopt);
 
-                return (GETOPT_MISSING);
+                return GETOPT_MISSING;
             }
 
             *optarg = argv + index2;
@@ -377,76 +386,39 @@ int mpegd_getopt(int argc, char **argv, char ***optarg, mpegd_option_t *opt)
         return (GETOPT_UNKNOWN);
     }
 
-    if ((index2 + ret->argcnt) > argc) {
-        fprintf (stderr,
-            "%s: missing option argument (-%c)\n",
-            argv[0], *curopt
-        );
+    if (index2 + ret->argcnt > argc)
+    {
+        fprintf(stderr, "%s: missing option argument (-%c)\n",
+            argv[0], *curopt);
+
         return (GETOPT_MISSING);
     }
 
     *optarg = argv + index2;
     index2 += ret->argcnt;
     curopt += 1;
-
-    return (ret->name1);
+    return ret->name1;
 }
 
-struct mpeg_stream_info_t
-{
-    uint32_t packet_cnt;
-    uint64_t size;
-};
-
-struct mpeg_shdr_t
-{
-    unsigned size;
-    int      fixed;
-    int      csps;
-};
-
-struct mpeg_packet_t
-{
-    unsigned type;
-    unsigned sid;
-    unsigned ssid;
-    unsigned size;
-    unsigned offset;
-    char have_pts;
-    uint64_t pts;
-    char have_dts;
-    uint64_t dts;
-};
-
-struct mpeg_pack_t
-{
-    unsigned size;
-    unsigned type;
-    uint64_t scr;
-    uint32_t mux_rate;
-    uint32_t stuff;
-};
-
-uint8_t par_stream[256];
-uint8_t par_substream[256];
-uint8_t par_stream_map[256];
-uint8_t par_substream_map[256];
-int par_no_shdr = 0;
-int par_no_pack = 0;
-int par_no_packet = 0;
-int par_no_end = 0;
-int par_empty_pack = 0;
-int par_remux_skipped = 0;
-int par_split = 0;
-int par_drop = 1;
-int par_scan = 0;
-int par_first_pts = 0;
-int par_dvdac3 = 0;
-int par_dvdsub = 0;
-char *par_demux_name = NULL;
-unsigned par_packet_max = 0;
+static uint8_t par_stream[256];
+static uint8_t par_substream[256];
+static uint8_t par_stream_map[256];
+static uint8_t par_substream_map[256];
+static int par_no_shdr = 0;
+static int par_no_pack = 0;
+static int par_no_packet = 0;
+static int par_no_end = 0;
+static int par_empty_pack = 0;
+static int par_remux_skipped = 0;
+static int par_split = 0;
+static int par_drop = 1;
+static int par_scan = 0;
+static int par_first_pts = 0;
+static int par_dvdac3 = 0;
+static int par_dvdsub = 0;
+static char *par_demux_name = NULL;
+static unsigned par_packet_max = 0;
 struct mpeg_demux_t;
-int mpeg_packet_check(mpeg_demux_t *mpeg);
 
 struct mpeg_demux_t
 {
@@ -454,17 +426,17 @@ struct mpeg_demux_t
     int free;
     FILE *fp;
     uint64_t ofs;
-    unsigned           buf_i;
-    unsigned           buf_n;
+    uint32_t buf_i;
+    uint32_t buf_n;
     uint8_t buf[MPEG_DEMUX_BUFFER];
-    mpeg_shdr_t        shdr;
-    mpeg_packet_t      packet;
-    mpeg_pack_t        pack;
+    mpeg_shdr_t shdr;
+    mpeg_packet_t packet;
+    mpeg_pack_t pack;
     uint32_t shdr_cnt;
     uint32_t pack_cnt;
-    unsigned long      packet_cnt;
-    unsigned long      end_cnt;
-    unsigned long      skip_cnt;
+    uint32_t packet_cnt;
+    uint32_t end_cnt;
+    uint32_t skip_cnt;
     mpeg_stream_info_t streams[256];
     mpeg_stream_info_t substreams[256];
     FILE *ext;
@@ -476,7 +448,7 @@ struct mpeg_demux_t
     int (*mpeg_end) (struct mpeg_demux_t *mpeg);
 };
 
-int mpeg_packet_check(mpeg_demux_t *mpeg)
+static int mpeg_packet_check(mpeg_demux_t *mpeg)
 {
     if (par_packet_max > 0 && mpeg->packet.size > par_packet_max)
         return 1;
@@ -502,12 +474,12 @@ static void mpeg_buf_free(mpeg_buffer_t *buf)
     buf->max = 0;
 }
 
-void mpeg_buf_clear (mpeg_buffer_t *buf)
+static void mpeg_buf_clear (mpeg_buffer_t *buf)
 {
     buf->cnt = 0;
 }
 
-int mpeg_buf_set_max (mpeg_buffer_t *buf, unsigned max)
+static int mpeg_buf_set_max (mpeg_buffer_t *buf, unsigned max)
 {
     if (buf->max == max)
         return 0;
@@ -537,7 +509,7 @@ int mpeg_buf_set_max (mpeg_buffer_t *buf, unsigned max)
     return 0;
 }
 
-int mpeg_buf_set_cnt(mpeg_buffer_t *buf, unsigned cnt)
+static int mpeg_buf_set_cnt(mpeg_buffer_t *buf, unsigned cnt)
 {
     if (cnt > buf->max)
         if (mpeg_buf_set_max (buf, cnt))
@@ -547,7 +519,7 @@ int mpeg_buf_set_cnt(mpeg_buffer_t *buf, unsigned cnt)
     return 0;
 }
 
-unsigned mpegd_read (mpeg_demux_t *mpeg, void *buf, unsigned n)
+static unsigned mpegd_read(mpeg_demux_t *mpeg, void *buf, unsigned n)
 {
     uint8_t *tmp = (uint8_t *)buf;
     uint32_t i = n < mpeg->buf_n ? n : mpeg->buf_n;
@@ -569,7 +541,8 @@ unsigned mpegd_read (mpeg_demux_t *mpeg, void *buf, unsigned n)
     return (ret);
 }
 
-int mpeg_buf_read (mpeg_buffer_t *buf, mpeg_demux_t *mpeg, unsigned cnt)
+static int
+mpeg_buf_read(mpeg_buffer_t *buf, mpeg_demux_t *mpeg, unsigned cnt)
 {
     if (mpeg_buf_set_cnt(buf, cnt))
         return 1;
@@ -582,16 +555,16 @@ int mpeg_buf_read (mpeg_buffer_t *buf, mpeg_demux_t *mpeg, unsigned cnt)
     return 0;
 }
 
-int mpeg_buf_write(mpeg_buffer_t *buf, FILE *fp)
+static int mpeg_buf_write(mpeg_buffer_t *buf, FILE *fp)
 {
     if (buf->cnt > 0)
         if (fwrite (buf->buf, 1, buf->cnt, fp) != buf->cnt)
-            return (1);
+            return 1;
 
     return 0;
 }
 
-int mpeg_buf_write_clear (mpeg_buffer_t *buf, FILE *fp)
+static int mpeg_buf_write_clear(mpeg_buffer_t *buf, FILE *fp)
 {
     if (buf->cnt > 0)
     {
@@ -606,7 +579,7 @@ int mpeg_buf_write_clear (mpeg_buffer_t *buf, FILE *fp)
     return 0;
 }
 
-void mpegd_reset_stats (mpeg_demux_t *mpeg)
+static void mpegd_reset_stats(mpeg_demux_t *mpeg)
 {
     mpeg->shdr_cnt = 0;
     mpeg->pack_cnt = 0;
@@ -623,7 +596,7 @@ void mpegd_reset_stats (mpeg_demux_t *mpeg)
     }
 }
 
-mpeg_demux_t *mpegd_open_fp (mpeg_demux_t *mpeg, FILE *fp, int close)
+static mpeg_demux_t *mpegd_open_fp(mpeg_demux_t *mpeg, FILE *fp, int close)
 {
     if (mpeg == NULL)
     {
@@ -655,7 +628,7 @@ mpeg_demux_t *mpegd_open_fp (mpeg_demux_t *mpeg, FILE *fp, int close)
     return mpeg;
 }
 
-void mpegd_close(mpeg_demux_t *mpeg)
+static void mpegd_close(mpeg_demux_t *mpeg)
 {
     if (mpeg->close)
         fclose (mpeg->fp);
@@ -702,7 +675,7 @@ static int mpegd_need_bits(mpeg_demux_t *mpeg, unsigned n)
     return 0;
 }
 
-uint32_t mpegd_get_bits(mpeg_demux_t *mpeg, unsigned i, unsigned n)
+static uint32_t mpegd_get_bits(mpeg_demux_t *mpeg, unsigned i, unsigned n)
 {
     uint32_t r, v, m;
     unsigned b_i, b_n;
@@ -779,7 +752,7 @@ static int mpegd_skip(mpeg_demux_t *mpeg, unsigned n)
     return 0;
 }
 
-int mpegd_set_offset(mpeg_demux_t *mpeg, uint64_t ofs)
+static int mpegd_set_offset(mpeg_demux_t *mpeg, uint64_t ofs)
 {
     if (ofs == mpeg->ofs)
         return 0;
@@ -831,87 +804,80 @@ static int mpegd_parse_system_header(mpeg_demux_t *mpeg)
 
 static int mpegd_parse_packet1(mpeg_demux_t *mpeg, unsigned i)
 {
-    unsigned val;
     uint64_t tmp;
     mpeg->packet.type = 1;
 
-    if (mpegd_get_bits (mpeg, i, 2) == 0x01)
+    if (mpegd_get_bits(mpeg, i, 2) == 0x01)
         i += 16;
 
-    val = mpegd_get_bits (mpeg, i, 8);
+    uint32_t val = mpegd_get_bits(mpeg, i, 8);
 
     if ((val & 0xf0) == 0x20)
     {
-        tmp = mpegd_get_bits (mpeg, i + 4, 3);
-        tmp = (tmp << 15) | mpegd_get_bits (mpeg, i + 8, 15);
-        tmp = (tmp << 15) | mpegd_get_bits (mpeg, i + 24, 15);
+        tmp = mpegd_get_bits(mpeg, i + 4, 3);
+        tmp = tmp << 15 | mpegd_get_bits(mpeg, i + 8, 15);
+        tmp = tmp << 15 | mpegd_get_bits(mpeg, i + 24, 15);
         mpeg->packet.have_pts = 1;
         mpeg->packet.pts = tmp;
         i += 40;
     }
     else if ((val & 0xf0) == 0x30)
     {
-        tmp = mpegd_get_bits (mpeg, i + 4, 3);
-        tmp = (tmp << 15) | mpegd_get_bits (mpeg, i + 8, 15);
-        tmp = (tmp << 15) | mpegd_get_bits (mpeg, i + 24, 15);
-
+        tmp = mpegd_get_bits(mpeg, i + 4, 3);
+        tmp = tmp << 15 | mpegd_get_bits(mpeg, i + 8, 15);
+        tmp = tmp << 15 | mpegd_get_bits(mpeg, i + 24, 15);
         mpeg->packet.have_pts = 1;
         mpeg->packet.pts = tmp;
-
-        tmp = mpegd_get_bits (mpeg, i + 44, 3);
-        tmp = (tmp << 15) | mpegd_get_bits (mpeg, i + 48, 15);
-        tmp = (tmp << 15) | mpegd_get_bits (mpeg, i + 64, 15);
-
+        tmp = mpegd_get_bits(mpeg, i + 44, 3);
+        tmp = tmp << 15 | mpegd_get_bits(mpeg, i + 48, 15);
+        tmp = tmp << 15 | mpegd_get_bits(mpeg, i + 64, 15);
         mpeg->packet.have_dts = 1;
         mpeg->packet.dts = tmp;
-
         i += 80;
     }
     else if (val == 0x0f)
     {
         i += 8;
     }
+
     mpeg->packet.offset = i / 8;
     return 0;
 }
 
-static
-int mpegd_parse_packet2 (mpeg_demux_t *mpeg, unsigned i)
+static int mpegd_parse_packet2(mpeg_demux_t *mpeg, unsigned i)
 {
-    unsigned           pts_dts_flag;
-    unsigned           cnt;
-    unsigned long long tmp;
-
+    uint64_t tmp;
     mpeg->packet.type = 2;
+    uint32_t pts_dts_flag = mpegd_get_bits(mpeg, i + 8, 2);
+    uint32_t cnt = mpegd_get_bits(mpeg, i + 16, 8);
 
-    pts_dts_flag = mpegd_get_bits (mpeg, i + 8, 2);
-    cnt = mpegd_get_bits (mpeg, i + 16, 8);
-
-    if (pts_dts_flag == 0x02) {
-        if (mpegd_get_bits (mpeg, i + 24, 4) == 0x02) {
+    if (pts_dts_flag == 0x02)
+    {
+        if (mpegd_get_bits (mpeg, i + 24, 4) == 0x02)
+        {
             tmp = mpegd_get_bits (mpeg, i + 28, 3);
-            tmp = (tmp << 15) | mpegd_get_bits (mpeg, i + 32, 15);
-            tmp = (tmp << 15) | mpegd_get_bits (mpeg, i + 48, 15);
-
+            tmp = (tmp << 15) | mpegd_get_bits(mpeg, i + 32, 15);
+            tmp = (tmp << 15) | mpegd_get_bits(mpeg, i + 48, 15);
             mpeg->packet.have_pts = 1;
             mpeg->packet.pts = tmp;
         }
     }
-    else if ((pts_dts_flag & 0x03) == 0x03) {
-        if (mpegd_get_bits (mpeg, i + 24, 4) == 0x03) {
-            tmp = mpegd_get_bits (mpeg, i + 28, 3);
-            tmp = (tmp << 15) | mpegd_get_bits (mpeg, i + 32, 15);
-            tmp = (tmp << 15) | mpegd_get_bits (mpeg, i + 48, 15);
-
+    else if ((pts_dts_flag & 0x03) == 0x03)
+    {
+        if (mpegd_get_bits(mpeg, i + 24, 4) == 0x03)
+        {
+            tmp = mpegd_get_bits(mpeg, i + 28, 3);
+            tmp = tmp << 15 | mpegd_get_bits(mpeg, i + 32, 15);
+            tmp = tmp << 15 | mpegd_get_bits(mpeg, i + 48, 15);
             mpeg->packet.have_pts = 1;
             mpeg->packet.pts = tmp;
         }
 
-        if (mpegd_get_bits (mpeg, i + 64, 4) == 0x01) {
-            tmp = mpegd_get_bits (mpeg, i + 68, 3);
-            tmp = (tmp << 15) | mpegd_get_bits (mpeg, i + 72, 15);
-            tmp = (tmp << 15) | mpegd_get_bits (mpeg, i + 88, 15);
-
+        if (mpegd_get_bits(mpeg, i + 64, 4) == 0x01)
+        {
+            tmp = mpegd_get_bits(mpeg, i + 68, 3);
+            tmp = tmp << 15 | mpegd_get_bits(mpeg, i + 72, 15);
+            tmp = tmp << 15 | mpegd_get_bits(mpeg, i + 88, 15);
             mpeg->packet.have_dts = 1;
             mpeg->packet.dts = tmp;
         }
@@ -922,16 +888,15 @@ int mpegd_parse_packet2 (mpeg_demux_t *mpeg, unsigned i)
     return 0;
 }
 
-static int mpegd_parse_packet (mpeg_demux_t *mpeg)
+static int mpegd_parse_packet(mpeg_demux_t *mpeg)
 {
-    unsigned sid, ssid;
     uint64_t ofs;
     mpeg->packet.type = 0;
-    sid = mpegd_get_bits (mpeg, 24, 8);
-    ssid = 0;
+    uint32_t sid = mpegd_get_bits(mpeg, 24, 8);
+    uint32_t ssid = 0;
     mpeg->packet.sid = sid;
     mpeg->packet.ssid = ssid;
-    mpeg->packet.size = mpegd_get_bits (mpeg, 32, 16) + 6;
+    mpeg->packet.size = mpegd_get_bits(mpeg, 32, 16) + 6;
     mpeg->packet.offset = 6;
     mpeg->packet.have_pts = 0;
     mpeg->packet.pts = 0;
@@ -939,38 +904,42 @@ static int mpegd_parse_packet (mpeg_demux_t *mpeg)
     mpeg->packet.dts = 0;
     unsigned i = 48;
 
-    if (((sid >= 0xc0) && (sid < 0xf0)) || (sid == 0xbd)) {
-        while (mpegd_get_bits (mpeg, i, 8) == 0xff) {
-            if (i > (48 + 16 * 8)) {
+    if ((sid >= 0xc0 && sid < 0xf0) || sid == 0xbd)
+    {
+        while (mpegd_get_bits(mpeg, i, 8) == 0xff)
+        {
+            if (i > (48 + 16 * 8))
                 break;
-            }
+            
             i += 8;
         }
 
-        if (mpegd_get_bits (mpeg, i, 2) == 0x02) {
-            if (mpegd_parse_packet2 (mpeg, i)) {
-                return (1);
-            }
+        if (mpegd_get_bits(mpeg, i, 2) == 0x02)
+        {
+            if (mpegd_parse_packet2(mpeg, i))
+                return 1;
         }
-        else {
-            if (mpegd_parse_packet1 (mpeg, i)) {
-                return (1);
-            }
+        else
+        {
+            if (mpegd_parse_packet1(mpeg, i))
+                return 1;
         }
     }
-    else if (sid == 0xbe) {
+    else if (sid == 0xbe)
+    {
         mpeg->packet.type = 1;
     }
 
-    if (sid == 0xbd) {
-        ssid = mpegd_get_bits (mpeg, 8 * mpeg->packet.offset, 8);
+    if (sid == 0xbd)
+    {
+        ssid = mpegd_get_bits(mpeg, 8 * mpeg->packet.offset, 8);
         mpeg->packet.ssid = ssid;
     }
 
-    if ((mpeg->mpeg_packet_check != NULL) && mpeg->mpeg_packet_check (mpeg)) {
-        if (mpegd_skip (mpeg, 1)) {
-            return (1);
-        }
+    if (mpeg->mpeg_packet_check != NULL && mpeg->mpeg_packet_check(mpeg))
+    {
+        if (mpegd_skip(mpeg, 1))
+            return 1;
     }
     else
     {
@@ -993,14 +962,11 @@ static int mpegd_parse_packet (mpeg_demux_t *mpeg)
         mpegd_set_offset (mpeg, ofs);
     }
 
-    return (0);
+    return 0;
 }
 
 static int mpegd_parse_pack(mpeg_demux_t *mpeg)
 {
-    unsigned sid;
-    uint64_t ofs;
-
     if (mpegd_get_bits(mpeg, 32, 4) == 0x02)
     {
         mpeg->pack.type = 1;
@@ -1029,14 +995,12 @@ static int mpegd_parse_pack(mpeg_demux_t *mpeg)
         mpeg->pack.size = 4;
     }
 
-    ofs = mpeg->ofs + mpeg->pack.size;
+    uint64_t ofs = mpeg->ofs + mpeg->pack.size;
     mpeg->pack_cnt += 1;
 
     if (mpeg->mpeg_pack != NULL)
-    {
         if (mpeg->mpeg_pack (mpeg))
             return 1;
-    }
 
     mpegd_set_offset (mpeg, ofs);
     mpegd_seek_header (mpeg);
@@ -1044,94 +1008,79 @@ static int mpegd_parse_pack(mpeg_demux_t *mpeg)
     if (mpegd_get_bits(mpeg, 0, 32) == MPEG_SYSTEM_HEADER)
     {
         if (mpegd_parse_system_header(mpeg))
-            return (1);
+            return 1;
 
         mpegd_seek_header (mpeg);
     }
 
     while (mpegd_get_bits(mpeg, 0, 24) == MPEG_PACKET_START)
     {
-        sid = mpegd_get_bits(mpeg, 24, 8);
+        uint32_t sid = mpegd_get_bits(mpeg, 24, 8);
 
-        if ((sid == 0xba) || (sid == 0xb9) || (sid == 0xbb)) {
+        if ((sid == 0xba) || (sid == 0xb9) || (sid == 0xbb))
             break;
-        }
-        else {
-            mpegd_parse_packet (mpeg);
-        }
-
+        
+        mpegd_parse_packet (mpeg);
         mpegd_seek_header (mpeg);
     }
 
-    return (0);
+    return 0;
 }
 
-int mpegd_parse(mpeg_demux_t *mpeg)
+static int mpegd_parse(mpeg_demux_t *mpeg)
 {
-    unsigned long long ofs;
+    uint64_t ofs;
 
-    while (1) {
-        if (mpegd_seek_header (mpeg)) {
-            return (0);
-        }
+    while (true)
+    {
+        if (mpegd_seek_header(mpeg))
+            return 0;
 
-        switch (mpegd_get_bits (mpeg, 0, 32)) {
+        switch (mpegd_get_bits(mpeg, 0, 32))
+        {
         case MPEG_PACK_START:
-            if (mpegd_parse_pack (mpeg)) {
-                return (1);
-            }
+            if (mpegd_parse_pack(mpeg))
+                return 1;
+            
             break;
-
         case MPEG_END_CODE:
             mpeg->end_cnt += 1;
-
             ofs = mpeg->ofs + 4;
 
-            if (mpeg->mpeg_end != NULL) {
-                if (mpeg->mpeg_end (mpeg)) {
-                    return (1);
-                }
-            }
+            if (mpeg->mpeg_end != NULL)
+                if (mpeg->mpeg_end(mpeg))
+                    return 1;
 
-            if (mpegd_set_offset (mpeg, ofs)) {
-                return (1);
-            }
+            if (mpegd_set_offset(mpeg, ofs))
+                return 1;
+            
             break;
-
         default:
             ofs = mpeg->ofs + 1;
 
-            if (mpeg->mpeg_skip != NULL) {
-                if (mpeg->mpeg_skip (mpeg)) {
-                    return (1);
-                }
-            }
+            if (mpeg->mpeg_skip != NULL)
+                if (mpeg->mpeg_skip(mpeg))
+                    return 1;
 
-            if (mpegd_set_offset (mpeg, ofs)) {
-                return (0);
-            }
+            if (mpegd_set_offset (mpeg, ofs))
+                return 0;
 
             break;
         }
     }
 
-    return (0);
+    return 0;
 }
 
-
-int mpeg_list(FILE *inp, FILE *out);
-int mpeg_demux(FILE *inp, FILE *out);
-int mpeg_remux(FILE *inp, FILE *out);
-
-static unsigned long long pts1[256];
-static unsigned long long pts2[256];
+static uint64_t pts1[256];
+static uint64_t pts2[256];
 
 static int mpeg_scan_system_header(mpeg_demux_t *mpeg)
 {
-    return (0);
+    return 0;
 }
 
-int mpeg_stream_excl (unsigned char sid, unsigned char ssid)
+static int mpeg_stream_excl(uint8_t sid, uint8_t ssid)
 {
     if ((par_stream[sid] & PAR_STREAM_SELECT) == 0)
         return 1;
@@ -1146,15 +1095,14 @@ int mpeg_stream_excl (unsigned char sid, unsigned char ssid)
 static int mpeg_scan_packet(mpeg_demux_t *mpeg)
 {
     int skip;
-    unsigned long long ofs;
     unsigned sid = mpeg->packet.sid;
     unsigned ssid = mpeg->packet.ssid;
 
     if (mpeg_stream_excl (sid, ssid))
         return 0;
 
-    FILE *fp = (FILE *)mpeg->ext;
-    ofs = mpeg->ofs;
+    FILE *fp = mpeg->ext;
+    uint64_t ofs = mpeg->ofs;
 
     if (mpegd_set_offset (mpeg, ofs + mpeg->packet.size))
     {
@@ -1164,69 +1112,66 @@ static int mpeg_scan_packet(mpeg_demux_t *mpeg)
 
     skip = 0;
 
-    if (sid == 0xbd) {
-        if (mpeg->substreams[ssid].packet_cnt > 1) {
-            if (!par_first_pts) {
-                return (0);
-            }
+    if (sid == 0xbd)
+    {
+        if (mpeg->substreams[ssid].packet_cnt > 1)
+        {
+            if (!par_first_pts)
+                return 0;
 
-            if (!mpeg->packet.have_pts) {
-                return (0);
-            }
+            if (!mpeg->packet.have_pts)
+                return 0;
 
-            if (mpeg->packet.pts >= pts2[ssid]) {
-                return (0);
-            }
+            if (mpeg->packet.pts >= pts2[ssid])
+                return 0;
         }
-        if (mpeg->packet.pts < pts2[ssid]) {
+
+        if (mpeg->packet.pts < pts2[ssid])
             pts2[ssid] = mpeg->packet.pts;
-        }
     }
-    else {
-        if (mpeg->streams[sid].packet_cnt > 1) {
-            if (!par_first_pts) {
-                return (0);
-            }
+    else
+    {
+        if (mpeg->streams[sid].packet_cnt > 1)
+        {
+            if (!par_first_pts)
+                return 0;
 
-            if (!mpeg->packet.have_pts) {
-                return (0);
-            }
+            if (!mpeg->packet.have_pts)
+                return 0;
 
-            if (mpeg->packet.pts >= pts1[sid]) {
-                return (0);
-            }
+            if (mpeg->packet.pts >= pts1[sid])
+                return 0;
         }
 
-        if (mpeg->packet.pts < pts1[sid]) {
+        if (mpeg->packet.pts < pts1[sid])
             pts1[sid] = mpeg->packet.pts;
-        }
     }
 
-    fprintf (fp, "%08" PRIxMAX ": sid=%02x", (uintmax_t) ofs, sid);
+    fprintf(fp, "%08" PRIxMAX ": sid=%02x", uintmax_t(ofs), sid);
 
-    if (sid == 0xbd) {
+    if (sid == 0xbd)
         fprintf (fp, "[%02x]", ssid);
-    }
-    else {
+    else
         fputs ("    ", fp);
-    }
 
-    if (mpeg->packet.type == 1) {
+    if (mpeg->packet.type == 1)
+    {
         fputs (" MPEG1", fp);
     }
-    else if (mpeg->packet.type == 2) {
+    else if (mpeg->packet.type == 2)
+    {
         fputs (" MPEG2", fp);
     }
-    else {
+    else
+    {
         fputs (" UNKWN", fp);
     }
 
     if (mpeg->packet.have_pts)
     {
-        fprintf (fp, " pts=%" PRIuMAX "[%.4f]",
-            (uintmax_t) mpeg->packet.pts,
-            (double) mpeg->packet.pts / 90000.0
-        );
+        fprintf(fp, " pts=%" PRIuMAX "[%.4f]",
+            uintmax_t(mpeg->packet.pts),
+            double(mpeg->packet.pts) / 90000.0);
     }
 
     fputs ("\n", fp);
@@ -1241,22 +1186,22 @@ static int mpeg_scan_pack(mpeg_demux_t *mpeg)
 
 static int mpeg_scan_end(mpeg_demux_t *mpeg)
 {
-    FILE *fp = (FILE *)mpeg->ext;
+    FILE *fp = mpeg->ext;
 
     if (!par_no_end)
     {
         fprintf(fp, "%08" PRIxMAX ": end code\n",
-            (uintmax_t)mpeg->ofs);
+            uintmax_t(mpeg->ofs));
     }
 
     return 0;
 }
 
-void mpeg_print_stats (mpeg_demux_t *mpeg, FILE *fp)
+static void mpeg_print_stats(mpeg_demux_t *mpeg, FILE *fp)
 {
     unsigned i;
 
-    fprintf (fp,
+    fprintf(fp,
         "System headers: %lu\n"
         "Packs:          %lu\n"
         "Packets:        %lu\n"
@@ -1269,11 +1214,11 @@ void mpeg_print_stats (mpeg_demux_t *mpeg, FILE *fp)
     {
         if (mpeg->streams[i].packet_cnt > 0)
         {
-            fprintf (fp,
+            fprintf(fp,
                 "Stream %02x:      "
                 "%lu packets / %" PRIuMAX " bytes\n",
                 i, mpeg->streams[i].packet_cnt,
-                (uintmax_t) mpeg->streams[i].size);
+                uintmax_t(mpeg->streams[i].size));
         }
     }
 
@@ -1284,48 +1229,42 @@ void mpeg_print_stats (mpeg_demux_t *mpeg, FILE *fp)
             fprintf(fp, "Substream %02x:   "
                 "%lu packets / %" PRIuMAX " bytes\n",
                 i, mpeg->substreams[i].packet_cnt,
-                (uintmax_t) mpeg->substreams[i].size);
+                uintmax_t(mpeg->substreams[i].size));
         }
     }
 
     fflush (fp);
 }
 
-int mpeg_scan (FILE *inp, FILE *out)
+static int mpeg_scan(FILE *inp, FILE *out)
 {
-    int          r;
-    unsigned     i;
+    int r;
+    unsigned i;
     mpeg_demux_t *mpeg;
 
-    for (i = 0; i < 256; i++) {
-        pts1[i] = ~(unsigned long long) 0;
-        pts2[i] = ~(unsigned long long) 0;
+    for (i = 0; i < 256; i++)
+    {
+        pts1[i] = 0xffffffffffffffff;
+        pts2[i] = 0xffffffffffffffff;
     }
 
-    mpeg = mpegd_open_fp (NULL, inp, 0);
-    if (mpeg == NULL) {
-        return (1);
-    }
+    mpeg = mpegd_open_fp(NULL, inp, 0);
+
+    if (mpeg == NULL)
+        return 1;
 
     mpeg->ext = out;
-
     mpeg->mpeg_system_header = &mpeg_scan_system_header;
     mpeg->mpeg_pack = &mpeg_scan_pack;
     mpeg->mpeg_packet = &mpeg_scan_packet;
     mpeg->mpeg_packet_check = &mpeg_packet_check;
     mpeg->mpeg_end = &mpeg_scan_end;
-
-    r = mpegd_parse (mpeg);
-
-    mpeg_print_stats (mpeg, out);
-
-    mpegd_close (mpeg);
-
-    return (r);
+    r = mpegd_parse(mpeg);
+    mpeg_print_stats(mpeg, out);
+    mpegd_close(mpeg);
+    return r;
 }
 
-char *mpeg_get_name (const char *base, unsigned sid);
-int mpeg_copy (mpeg_demux_t *mpeg, FILE *fp, unsigned n);
 static unsigned par_mode = PAR_MODE_SCAN;
 static FILE     *par_inp = NULL;
 static FILE     *par_out = NULL;
@@ -1358,7 +1297,7 @@ static mpegd_option_t opts[] = {
  {  -1, 0, NULL, NULL, NULL }
 };
 
-static void print_help (void)
+static void print_help()
 {
     mpegd_getopt_help("mpegdemux: demultiplex MPEG1/2 system streams",
         "usage: mpegdemux [options] [input [output]]", opts);
@@ -1366,7 +1305,7 @@ static void print_help (void)
     fflush (stdout);
 }
 
-static void print_version (void)
+static void print_version()
 {
     fputs("mpegdemux version " MPEGDEMUX_VERSION_STR
         "\n\n"
@@ -1402,13 +1341,15 @@ static int str_get_streams(const char *str, uint8_t stm[256], unsigned msk)
 
     while (*str != 0)
     {
-        str = str_skip_white (str);
+        str = str_skip_white(str);
 
-        if (*str == '+') {
+        if (*str == '+')
+        {
             str += 1;
             incl = 1;
         }
-        else if (*str == '-') {
+        else if (*str == '-')
+        {
             str += 1;
             incl = 0;
         }
@@ -1431,116 +1372,104 @@ static int str_get_streams(const char *str, uint8_t stm[256], unsigned msk)
         }
         else
         {
-            stm1 = (unsigned) strtoul (str, &tmp, 0);
-   if (tmp == str) {
-    return (1);
-   }
+            stm1 = uint32_t(strtoul(str, &tmp, 0));
+            if (tmp == str) {
+                return (1);
+            }
 
-   str = tmp;
+            str = tmp;
 
-   if (*str == '-') {
-    str += 1;
-    stm2 = (unsigned) strtoul (str, &tmp, 0);
-    if (tmp == str) {
-     return (1);
+            if (*str == '-')
+            {
+                str += 1;
+                stm2 = (unsigned) strtoul (str, &tmp, 0);
+
+                if (tmp == str)
+                    return 1;
+
+                str = tmp;
+            }
+            else
+            {
+                stm2 = stm1;
+            }
+        }
+
+        if (incl)
+        {
+            for (i = stm1; i <= stm2; i++)
+                stm[i] |= msk;
+        }
+        else
+        {
+            for (i = stm1; i <= stm2; i++)
+                stm[i] &= ~msk;
+        }
+
+        str = str_skip_white (str);
+
+        if (*str == '/')
+            str += 1;
     }
-    str = tmp;
-   }
-   else {
-    stm2 = stm1;
-   }
-  }
 
-  if (incl) {
-   for (i = stm1; i <= stm2; i++) {
-    stm[i] |= msk;
-   }
-  }
-  else {
-   for (i = stm1; i <= stm2; i++) {
-    stm[i] &= ~msk;
-   }
-  }
-
-  str = str_skip_white (str);
-
-  if (*str == '/') {
-   str += 1;
-  }
- }
-
- return (0);
+    return 0;
 }
 
-char *mpeg_get_name (const char *base, unsigned sid)
+static char *mpeg_get_name(const char *base, unsigned sid)
 {
- unsigned n;
- unsigned dig;
- char     *ret;
+    if (base == NULL)
+        base = "stream_##.dat";
 
- if (base == NULL) {
-  base = "stream_##.dat";
- }
+    uint32_t n = 0;
 
- n = 0;
- while (base[n] != 0) {
-  n += 1;
- }
+    while (base[n] != 0)
+        n += 1;
 
- n += 1;
+    n += 1;
+    char *ret = (char *)malloc(n);
 
- ret = (char *) malloc (n);
- if (ret == NULL) {
-  return (NULL);
- }
-
- while (n > 0) {
-  n -= 1;
-  ret[n] = base[n];
-
-  if (ret[n] == '#') {
-   dig = sid % 16;
-   sid = sid / 16;
-   if (dig < 10) {
-    ret[n] = '0' + dig;
-   }
-   else {
-    ret[n] = 'a' + dig - 10;
-   }
-  }
- }
-
- return (ret);
-}
-
-int mpeg_copy (mpeg_demux_t *mpeg, FILE *fp, unsigned n)
-{
-    uint8_t buf[4096];
-    unsigned      i, j;
+    if (ret == NULL)
+        return (NULL);
 
     while (n > 0)
     {
-        i = (n < 4096) ? n : 4096;
-        j = mpegd_read (mpeg, buf, i);
+        n -= 1;
+        ret[n] = base[n];
 
-  if (j > 0) {
-   if (fwrite (buf, 1, j, fp) != j) {
-    return (1);
-   }
-  }
+        if (ret[n] == '#')
+        {
+            uint32_t dig = sid % 16;
+            sid = sid / 16;
+            ret[n] = dig < 10 ? '0' + dig : 'a' + dig - 10;
+        }
+    }
 
-  if (i != j) {
-   return (1);
-  }
-
-  n -= i;
- }
-
- return (0);
+    return ret;
 }
 
-static
-int mpeg_demux_copy_spu(mpeg_demux_t *mpeg, FILE *fp, unsigned cnt)
+static int mpeg_copy(mpeg_demux_t *mpeg, FILE *fp, unsigned n)
+{
+    uint8_t buf[4096];
+
+    while (n > 0)
+    {
+        uint32_t i = n < 4096 ? n : 4096;
+        uint32_t j = mpegd_read(mpeg, buf, i);
+
+        if (j > 0)
+            if (fwrite(buf, 1, j, fp) != j)
+                return 1;
+
+        if (i != j)
+            return 1;
+
+        n -= i;
+    }
+
+    return 0;
+}
+
+static int mpeg_demux_copy_spu(mpeg_demux_t *mpeg, FILE *fp, unsigned cnt)
 {
     static unsigned spucnt = 0;
     static int half = 0;
@@ -1614,23 +1543,21 @@ int mpeg_demux_copy_spu(mpeg_demux_t *mpeg, FILE *fp, unsigned cnt)
 static FILE *
 mpeg_demux_open(mpeg_demux_t *mpeg, unsigned sid, unsigned ssid)
 {
-    FILE     *fp;
-    char     *name;
-    unsigned seq;
+    FILE *fp;
 
     if (par_demux_name == NULL)
     {
-        fp = (FILE *) mpeg->ext;
+        fp = mpeg->ext;
     }
     else
     {
-        seq = (sid == 0xbd) ? ((sid << 8) + ssid) : sid;
-        name = mpeg_get_name (par_demux_name, seq);
-        fp = fopen (name, "wb");
+        uint32_t seq = sid == 0xbd ? (sid << 8) + ssid : sid;
+        char *name = mpeg_get_name(par_demux_name, seq);
+        fp = fopen(name, "wb");
 
         if (fp == NULL)
         {
-            prt_err ("can't open stream file (%s)\n", name);
+            prt_msg("can't open stream file (%s)\n", name);
 
             if (sid == 0xbd)
                 par_substream[ssid] &= ~PAR_STREAM_SELECT;
@@ -1644,15 +1571,16 @@ mpeg_demux_open(mpeg_demux_t *mpeg, unsigned sid, unsigned ssid)
         free(name);
     }
 
-    if ((sid == 0xbd) && par_dvdsub)
+    if (sid == 0xbd && par_dvdsub)
     {
-        if (fwrite ("SPU ", 1, 4, fp) != 4) {
-            fclose (fp);
-            return (NULL);
+        if (fwrite("SPU ", 1, 4, fp) != 4)
+        {
+            fclose(fp);
+            return NULL;
         }
     }
 
-    return (fp);
+    return fp;
 }
 
 static int mpeg_demux_system_header(mpeg_demux_t *mpeg)
@@ -1686,7 +1614,7 @@ static int mpeg_demux_packet(mpeg_demux_t *mpeg)
 
     if (cnt > mpeg->packet.size)
     {
-        prt_msg ("demux: AC3 packet too small (sid=%02x size=%u)\n",
+        prt_msg("demux: AC3 packet too small (sid=%02x size=%u)\n",
             sid, mpeg->packet.size);
 
         return 1;
@@ -1694,28 +1622,26 @@ static int mpeg_demux_packet(mpeg_demux_t *mpeg)
 
     if (fp[fpi] == NULL)
     {
-        fp[fpi] = mpeg_demux_open (mpeg, sid, ssid);
+        fp[fpi] = mpeg_demux_open(mpeg, sid, ssid);
 
         if (fp[fpi] == NULL)
             return 1;
     }
 
-    if (cnt > 0) {
-        mpegd_skip (mpeg, cnt);
-    }
+    if (cnt > 0)
+        mpegd_skip(mpeg, cnt);
 
     cnt = mpeg->packet.size - cnt;
 
-    if ((sid == 0xbd) && par_dvdsub) {
-        return (mpeg_demux_copy_spu (mpeg, fp[fpi], cnt));
-    }
+    if ((sid == 0xbd) && par_dvdsub)
+        return mpeg_demux_copy_spu(mpeg, fp[fpi], cnt);
 
     r = 0;
 
-    if (mpeg_buf_read (&packet, mpeg, cnt)) {
-        prt_msg ("demux: incomplete packet (sid=%02x size=%u/%u)\n",
-            sid, packet.cnt, cnt
-        );
+    if (mpeg_buf_read (&packet, mpeg, cnt))
+    {
+        prt_msg("demux: incomplete packet (sid=%02x size=%u/%u)\n",
+            sid, packet.cnt, cnt);
 
         if (par_drop) {
             mpeg_buf_clear (&packet);
@@ -1741,7 +1667,7 @@ static int mpeg_demux_end (mpeg_demux_t *mpeg)
     return (0);
 }
 
-int mpeg_demux(FILE *inp, FILE *out)
+static int mpeg_demux(FILE *inp, FILE *out)
 {
     for (unsigned i = 0; i < 512; i++)
         fp[i] = NULL;
@@ -1792,38 +1718,33 @@ static int mpeg_list_skip(mpeg_demux_t *mpeg)
 
 static int mpeg_list_system_header(mpeg_demux_t *mpeg)
 {
-    FILE *fp;
-
     if (par_no_shdr)
         return 0;
 
-    fp = (FILE *)mpeg->ext;
-    mpeg_list_print_skip (fp);
+    FILE *fp = mpeg->ext;
+    mpeg_list_print_skip(fp);
 
-    fprintf (fp, "%08" PRIxMAX ": system header[%lu]: "
+    fprintf(fp, "%08" PRIxMAX ": system header[%lu]: "
         "size=%u fixed=%d csps=%d\n",
-        (uintmax_t) mpeg->ofs,
+        (uintmax_t)mpeg->ofs,
         mpeg->shdr_cnt - 1,
-        mpeg->shdr.size, mpeg->shdr.fixed, mpeg->shdr.csps
-    );
+        mpeg->shdr.size, mpeg->shdr.fixed, mpeg->shdr.csps);
 
     return (0);
 }
 
 static int mpeg_list_packet (mpeg_demux_t *mpeg)
 {
-    FILE *fp;
-
     if (par_no_packet)
         return 0;
 
     uint32_t sid = mpeg->packet.sid;
     uint32_t ssid = mpeg->packet.ssid;
 
-    if (mpeg_stream_excl (sid, ssid))
+    if (mpeg_stream_excl(sid, ssid))
         return 0;
 
-    fp = (FILE *) mpeg->ext;
+    FILE *fp = mpeg->ext;
     mpeg_list_print_skip (fp);
 
     fprintf(fp, "%08" PRIxMAX ": packet[%lu]: sid=%02x",
@@ -1843,28 +1764,25 @@ static int mpeg_list_packet (mpeg_demux_t *mpeg)
 
     fprintf (fp, " size=%u", mpeg->packet.size);
 
-    if (mpeg->packet.have_pts || mpeg->packet.have_dts) {
-        fprintf (fp,
-            " pts=%" PRIuMAX "[%.4f] dts=%" PRIuMAX "[%.4f]",
-            (uintmax_t) mpeg->packet.pts,
-            (double) mpeg->packet.pts / 90000.0,
-            (uintmax_t) mpeg->packet.dts,
-            (double) mpeg->packet.dts / 90000.0
-        );
+    if (mpeg->packet.have_pts || mpeg->packet.have_dts)
+    {
+        fprintf(fp, " pts=%" PRIuMAX "[%.4f] dts=%" PRIuMAX "[%.4f]",
+            uintmax_t(mpeg->packet.pts),
+            double(mpeg->packet.pts) / 90000.0,
+            uintmax_t(mpeg->packet.dts),
+            double(mpeg->packet.dts) / 90000.0);
     }
 
-    fputs ("\n", fp);
+    fputs("\n", fp);
     return 0;
 }
 
 static int mpeg_list_pack(mpeg_demux_t *mpeg)
 {
-    FILE *fp;
-
     if (par_no_pack)
         return 0;
 
-    fp = (FILE *)mpeg->ext;
+    FILE *fp = mpeg->ext;
     mpeg_list_print_skip (fp);
 
     fprintf(fp, "%08" PRIxMAX ": pack[%lu]: "
@@ -1874,30 +1792,28 @@ static int mpeg_list_pack(mpeg_demux_t *mpeg)
         mpeg->pack.mux_rate, 50.0 * mpeg->pack.mux_rate,
         mpeg->pack.stuff);
 
-    fflush (fp);
+    fflush(fp);
     return 0;
 }
 
 static int mpeg_list_end(mpeg_demux_t *mpeg)
 {
-    FILE *fp;
-
     if (par_no_end)
         return 0;
 
-    fp = (FILE *) mpeg->ext;
+    FILE *fp = mpeg->ext;
     mpeg_list_print_skip (fp);
     fprintf (fp, "%08" PRIxMAX ": end\n", (uintmax_t) mpeg->ofs);
     return 0;
 }
 
-int mpeg_list(FILE *inp, FILE *out)
+static int mpeg_list(FILE *inp, FILE *out)
 {
     mpeg_demux_t *mpeg;
     mpeg = mpegd_open_fp(NULL, inp, 0);
 
     if (mpeg == NULL)
-        return (1);
+        return 1;
 
     skip_cnt = 0;
     skip_ofs = 0;
@@ -1950,7 +1866,7 @@ static int mpeg_remux_skip(mpeg_demux_t *mpeg)
     if (par_remux_skipped == 0)
         return 0;
 
-    if (mpeg_copy (mpeg, (FILE *)mpeg->ext, 1))
+    if (mpeg_copy(mpeg, mpeg->ext, 1))
         return 1;
 
     return 0;
@@ -1985,7 +1901,7 @@ static int mpeg_remux_packet(mpeg_demux_t *mpeg)
 
     if (mpeg_buf_read (&packet, mpeg, mpeg->packet.size))
     {
-        prt_msg ("remux: incomplete packet (sid=%02x size=%u/%u)\n",
+        prt_msg("remux: incomplete packet (sid=%02x size=%u/%u)\n",
             sid, packet.cnt, mpeg->packet.size);
 
         if (par_drop)
@@ -2041,7 +1957,7 @@ static int mpeg_remux_end(mpeg_demux_t *mpeg)
     return 0;
 }
 
-int mpeg_remux(FILE *inp, FILE *out)
+static int mpeg_remux(FILE *inp, FILE *out)
 {
     mpeg_demux_t *mpeg;
     mpeg = mpegd_open_fp(NULL, inp, 0);
@@ -2177,10 +2093,10 @@ int main(int argc, char **argv)
             }
             else
             {
-                if (str_get_streams (optarg[0], par_stream, PAR_STREAM_INVALID))
+                if (str_get_streams(optarg[0], par_stream, PAR_STREAM_INVALID))
                 {
-                    prt_err ("%s: bad stream id (%s)\n", argv[0], optarg[0]);
-                    return (1);
+                    prt_msg("%s: bad stream id (%s)\n", argv[0], optarg[0]);
+                    return 1;
                 }
             }
             break;
@@ -2199,13 +2115,13 @@ int main(int argc, char **argv)
         case 'p':
             if (str_get_streams (optarg[0], par_substream, PAR_STREAM_SELECT))
             {
-                prt_err("%s: bad substream id (%s)\n", argv[0], optarg[0]);
+                prt_msg("%s: bad substream id (%s)\n", argv[0], optarg[0]);
                 return 1;
             }
             break;
         case 'P':
-            id1 = (unsigned) strtoul (optarg[0], NULL, 0);
-            id2 = (unsigned) strtoul (optarg[1], NULL, 0);
+            id1 = unsigned(strtoul(optarg[0], NULL, 0));
+            id2 = unsigned(strtoul(optarg[1], NULL, 0));
             par_substream_map[id1 & 0xff] = id2 & 0xff;
             break;
         case 'r':
@@ -2214,7 +2130,7 @@ int main(int argc, char **argv)
         case 's':
             if (str_get_streams (optarg[0], par_stream, PAR_STREAM_SELECT))
             {
-                prt_err ("%s: bad stream id (%s)\n", argv[0], optarg[0]);
+                prt_msg("%s: bad stream id (%s)\n", argv[0], optarg[0]);
                 return 1;
             }
             break;
@@ -2245,7 +2161,7 @@ int main(int argc, char **argv)
 
                 if (par_inp == NULL)
                 {
-                    prt_err("%s: can't open input file (%s)\n",
+                    prt_msg("%s: can't open input file (%s)\n",
                             argv[0], optarg[0]);
 
                     return (1);
@@ -2260,7 +2176,7 @@ int main(int argc, char **argv)
 
                 if (par_out == NULL)
                 {
-                    prt_err("%s: can't open output file (%s)\n",
+                    prt_msg("%s: can't open output file (%s)\n",
                                 argv[0], optarg[0]);
 
                     return 1;
@@ -2268,7 +2184,7 @@ int main(int argc, char **argv)
             }
             else
             {
-                prt_err("%s: too many files (%s)\n", argv[0], optarg[0]);
+                prt_msg("%s: too many files (%s)\n", argv[0], optarg[0]);
                 return 1;
             }
             break;
