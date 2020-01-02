@@ -21,6 +21,7 @@
 #define MPEGDEMUX_VERSION_STR "0.1.4"
 
 #include "options.h"
+#include "buffer.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -41,13 +42,6 @@ static constexpr uint16_t MPEG_END_CODE = 0x01b9;
 static constexpr uint16_t MPEG_PACK_START = 0x01ba;
 static constexpr uint16_t MPEG_SYSTEM_HEADER = 0x01bb;
 static constexpr uint16_t MPEG_PACKET_START = 0x0001;
-
-struct mpeg_buffer_t
-{
-    uint8_t *buf;
-    uint32_t cnt;
-    uint32_t max;
-};
 
 struct mpeg_stream_info_t
 {
@@ -88,8 +82,8 @@ class mpeg_demux_t
 {
 private:
     void resetStats();
+    int _close;
 public:
-    int close;
     FILE *fp;
     uint64_t ofs;
     uint32_t buf_i;
@@ -113,6 +107,7 @@ public:
     int (*mpeg_packet_check)(mpeg_demux_t *mpeg);
     int (*mpeg_end)(mpeg_demux_t *mpeg);
     mpeg_demux_t(FILE *fp);
+    void close();
 };
 
 class MpegAction
@@ -147,8 +142,6 @@ class MpegDemux : public MpegAction
 
 class Main
 {
-    void mpeg_buf_init(mpeg_buffer_t *buf) const;
-    void mpegd_close(mpeg_demux_t *mpeg);
     char *str_clone(const char *str);
     void print_version() const;
     int str_get_streams(const char *str, uint8_t stm[256], unsigned msk);
@@ -165,7 +158,6 @@ public:
 //---------------------------------------
 
 static Options g_opts;
-static mpeg_buffer_t packet = { nullptr, 0, 0 };
 static FILE *fp[512];
 static uint8_t par_stream[256];
 static uint8_t par_substream[256];
@@ -182,8 +174,9 @@ static uint64_t pts1[256];
 static uint64_t pts2[256];
 static uint64_t skip_ofs = 0;
 static uint32_t skip_cnt = 0;
-static mpeg_buffer_t shdr = { NULL, 0, 0 };
-static mpeg_buffer_t pack = { NULL, 0, 0 };
+static mpeg_buffer_t packet = { nullptr, 0, 0 };
+static mpeg_buffer_t shdr = { nullptr, 0, 0 };
+static mpeg_buffer_t pack = { nullptr, 0, 0 };
 static uint32_t sequence = 0;
 
 static void prt_msg(const char *msg, ...)
@@ -203,66 +196,6 @@ static int mpeg_packet_check(mpeg_demux_t *mpeg)
     if (par_stream[mpeg->packet.sid] & PAR_STREAM_INVALID)
         return 1;
 
-    return 0;
-}
-
-void Main::mpeg_buf_init(mpeg_buffer_t *buf) const
-{
-    buf->buf = nullptr;
-    buf->max = 0;
-    buf->cnt = 0;
-}
-
-static void mpeg_buf_free(mpeg_buffer_t *buf)
-{
-    free(buf->buf);
-    buf->buf = nullptr;
-    buf->cnt = 0;
-    buf->max = 0;
-}
-
-static void mpeg_buf_clear(mpeg_buffer_t *buf)
-{
-    buf->cnt = 0;
-}
-
-static int mpeg_buf_set_max(mpeg_buffer_t *buf, unsigned max)
-{
-    if (buf->max == max)
-        return 0;
-
-    if (max == 0)
-    {
-        free(buf->buf);
-        buf->max = 0;
-        buf->cnt = 0;
-        return 0;
-    }
-
-    buf->buf = (uint8_t *)realloc(buf->buf, max);
-
-    if (buf->buf == nullptr)
-    {
-        buf->max = 0;
-        buf->cnt = 0;
-        return 1;
-    }
-
-    buf->max = max;
-
-    if (buf->cnt > max)
-        buf->cnt = max;
-
-    return 0;
-}
-
-static int mpeg_buf_set_cnt(mpeg_buffer_t *buf, unsigned cnt)
-{
-    if (cnt > buf->max)
-        if (mpeg_buf_set_max (buf, cnt))
-            return 1;
-
-    buf->cnt = cnt;
     return 0;
 }
 
@@ -291,10 +224,10 @@ static unsigned mpegd_read(mpeg_demux_t *mpeg, void *buf, unsigned n)
 static int
 mpeg_buf_read(mpeg_buffer_t *buf, mpeg_demux_t *mpeg, unsigned cnt)
 {
-    if (mpeg_buf_set_cnt(buf, cnt))
+    if (buf->setCnt(cnt))
         return 1;
 
-    buf->cnt = mpegd_read (mpeg, buf->buf, cnt);
+    buf->cnt = mpegd_read(mpeg, buf->buf, cnt);
 
     if (buf->cnt != cnt)
         return 1;
@@ -337,7 +270,7 @@ void mpeg_demux_t::resetStats()
 mpeg_demux_t::mpeg_demux_t(FILE *fp)
 {
     this->fp = fp;
-    this->close = 0;
+    this->_close = 0;
     this->ofs = 0;
     this->buf_i = 0;
     this->buf_n = 0;
@@ -351,10 +284,10 @@ mpeg_demux_t::mpeg_demux_t(FILE *fp)
     resetStats();
 }
 
-void Main::mpegd_close(mpeg_demux_t *mpeg)
+void mpeg_demux_t::close()
 {
-    if (mpeg->close)
-        fclose(mpeg->fp);
+    if (_close)
+        fclose(this->fp);
 }
 
 static int mpegd_buffer_fill(mpeg_demux_t *mpeg)
@@ -963,7 +896,7 @@ int Main::mpeg_scan(FILE *inp, FILE *out)
     mpeg.mpeg_end = &mpeg_scan_end;
     int r = mpegd_parse(&mpeg);
     mpeg_print_stats(&mpeg, out);
-    mpegd_close(&mpeg);
+    mpeg.close();
     return r;
 }
 
@@ -1308,7 +1241,7 @@ static int mpeg_demux_packet(mpeg_demux_t *mpeg)
 
         if (g_opts.drop())
         {
-            mpeg_buf_clear (&packet);
+            packet.clear();
             return (1);
         }
 
@@ -1344,7 +1277,7 @@ int Main::mpeg_demux(FILE *inp, FILE *out)
     mpeg.mpeg_end = &mpeg_demux_end;
     mpeg.ext = out;
     int r = mpegd_parse(&mpeg);
-    mpegd_close(&mpeg);
+    mpeg.close();
 
     for (unsigned i = 0; i < 512; i++)
         if (fp[i] != NULL && fp[i] != out)
@@ -1479,7 +1412,7 @@ int Main::mpeg_list(FILE *inp, FILE *out)
     int r = mpegd_parse(&mpeg);
     mpeg_list_print_skip(out);
     mpeg_print_stats(&mpeg, out);
-    mpegd_close(&mpeg);
+    mpeg.close();
     return r;
 }
 
@@ -1554,7 +1487,7 @@ static int mpeg_remux_packet(mpeg_demux_t *mpeg)
 
         if (g_opts.drop())
         {
-            mpeg_buf_clear (&packet);
+            packet.clear();
             return 1;
         }
 
@@ -1628,9 +1561,9 @@ int Main::mpeg_remux(FILE *inp, FILE *out)
     mpeg.mpeg_packet = mpeg_remux_packet;
     mpeg.mpeg_packet_check = mpeg_packet_check;
     mpeg.mpeg_end = mpeg_remux_end;
-    mpeg_buf_init(&shdr);
-    mpeg_buf_init(&pack);
-    mpeg_buf_init(&packet);
+    shdr.init();
+    pack.init();
+    packet.init();
     int r = mpegd_parse(&mpeg);
 
     if (par_no_end)
@@ -1651,10 +1584,10 @@ int Main::mpeg_remux(FILE *inp, FILE *out)
         mpeg.ext = NULL;
     }
 
-    mpegd_close(&mpeg);
-    mpeg_buf_free(&shdr);
-    mpeg_buf_free(&pack);
-    mpeg_buf_free(&packet);
+    mpeg.close();
+    shdr.free();
+    pack.free();
+    packet.free();
     return r;
 }
 

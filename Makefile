@@ -3,13 +3,16 @@ CXXFLAGS = -Wall
 all: mpegdemux
 
 main.o: main.cpp
-	g++ -c $(CXXFLAGS) main.cpp
+	g++ -c $(CXXFLAGS) $<
 
 options.o: options.cpp
-	g++ -c $(CXXFLAGS) options.cpp
+	g++ -c $(CXXFLAGS) $<
 
-mpegdemux: main.o options.o
-	g++ -o mpegdemux main.o options.o
+buffer.o: buffer.cpp
+	g++ -c $(CXXFLAGS) $<
+
+mpegdemux: main.o options.o buffer.o
+	g++ -o mpegdemux $^
 
 clean:
 	rm -vf mpegdemux *.o
