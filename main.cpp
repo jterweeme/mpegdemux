@@ -77,11 +77,11 @@ private:
     int _close = 0;
 public:
     FILE *_fp;
-    uint64_t ofs;
-    uint32_t buf_i;
+    uint64_t _ofs = 0;
+    uint32_t _buf_i = 0;
     uint32_t buf_n;
     uint8_t buf[MPEG_DEMUX_BUFFER];
-    mpeg_shdr_t shdr;
+    mpeg_shdr_t _shdr;
     mpeg_packet_t _packet;
     mpeg_pack_t _pack;
     uint32_t shdr_cnt;
@@ -93,19 +93,16 @@ public:
     mpeg_stream_info_t substreams[256];
     FILE *ext;
 protected:
-    static int mpeg_buf_read(mpeg_buffer_t *buf, mpeg_demux_t *mpeg, unsigned cnt);
-    static int returnNull(mpeg_demux_t *mpeg);
-    static int packetCheck(mpeg_demux_t *mpeg);
-    static int mpeg_copy(mpeg_demux_t *mpeg, FILE *fp, unsigned n);
-    static int mpeg_stream_excl(uint8_t sid, uint8_t ssid);
+    int mpeg_buf_read(mpeg_buffer_t *buf, mpeg_demux_t *mpeg, unsigned cnt);
+    int mpeg_copy(mpeg_demux_t *mpeg, FILE *fp, unsigned n);
+    int mpeg_stream_excl(uint8_t sid, uint8_t ssid);
 public:
-    int (*mpeg_skip)(mpeg_demux_t *mpeg);
-    int (*mpeg_pack)(mpeg_demux_t *mpeg);
-    int (*mpeg_system_header)(mpeg_demux_t *mpeg);
-    int (*mpeg_packet)(mpeg_demux_t *mpeg);
-    int (*mpeg_packet_check)(mpeg_demux_t *mpeg);
-    int (*mpeg_end)(mpeg_demux_t *mpeg);
-public:
+    virtual int pack(mpeg_demux_t *mpeg);
+    virtual int packet(mpeg_demux_t *mpeg);
+    virtual int end();
+    virtual int skip(mpeg_demux_t *mpeg);
+    virtual int system_header(mpeg_demux_t *mpeg);
+    virtual int packet_check(mpeg_demux_t *mpeg);
     mpeg_demux_t(FILE *fp);
     void close();
 };
@@ -113,33 +110,31 @@ public:
 class MpegDemux : public mpeg_demux_t
 {
 private:
-    static int mpeg_demux_copy_spu(mpeg_demux_t *mpeg, FILE *fp, unsigned cnt);
-    static FILE *mpeg_demux_open(mpeg_demux_t *mpeg, unsigned sid, unsigned ssid);
+    int mpeg_demux_copy_spu(mpeg_demux_t *mpeg, FILE *fp, unsigned cnt);
+    FILE *mpeg_demux_open(mpeg_demux_t *mpeg, unsigned sid, unsigned ssid);
 public:
     MpegDemux(FILE *fp);
-    static int packet(mpeg_demux_t *);
+    int packet(mpeg_demux_t *);
 };
 
 class MpegRemux : public mpeg_demux_t
 {
 public:
     MpegRemux(FILE *fp);
-    static int mpeg_remux_next_fp(mpeg_demux_t *mpeg);
-    static int skip(mpeg_demux_t *);
-    static int pack(mpeg_demux_t *);
-    static int system_header(mpeg_demux_t *);
-    static int packet(mpeg_demux_t *);
-    static int packet_check(mpeg_demux_t *);
-    static int end(mpeg_demux_t *);
+    int mpeg_remux_next_fp(mpeg_demux_t *mpeg);
+    int skip(mpeg_demux_t *);   //override
+    int pack(mpeg_demux_t *);   //override
+    int system_header(mpeg_demux_t *);
+    int packet(mpeg_demux_t *); //override
+    int end(); //override
 };
 
 class MpegScan : public mpeg_demux_t
 {
 public:
     MpegScan(FILE *fp);
-    static int packet(mpeg_demux_t *);
-    static int packet_check(mpeg_demux_t *);
-    static int end(mpeg_demux_t *);
+    int packet(mpeg_demux_t *); //override
+    int end(mpeg_demux_t *);    //override
     int scan(FILE *inp, FILE *out);
 };
 
@@ -148,16 +143,16 @@ class MpegList : public mpeg_demux_t
 public:
     MpegList(FILE *fp);
     static void mpeg_list_print_skip(FILE *fp);
-    static int skip(mpeg_demux_t *);
-    static int pack(mpeg_demux_t *);
-    static int system_header(mpeg_demux_t *);
-    static int packet(mpeg_demux_t *);
-    static int packet_check(mpeg_demux_t *);
-    static int end(mpeg_demux_t *);
+    int skip(mpeg_demux_t *);
+    int pack(mpeg_demux_t *); //override
+    int system_header(mpeg_demux_t *);  //override
+    int packet(mpeg_demux_t *); //override
+    int end();    //override
 };
 
 class Main
 {
+private:
     char *str_clone(const char *str) const;
     void print_version() const;
     int str_get_streams(const char *str, uint8_t stm[256], unsigned msk) const;
@@ -180,9 +175,9 @@ static uint8_t par_substream_map[256];
 static char *par_demux_name = nullptr;
 static uint64_t pts1[256];
 static uint64_t pts2[256];
-static uint64_t skip_ofs = 0;
+static uint64_t g_skip_ofs = 0;
 static uint32_t g_skip_cnt = 0;
-static mpeg_buffer_t packet = { nullptr, 0, 0 };
+static mpeg_buffer_t g_packet = { nullptr, 0, 0 };
 static mpeg_buffer_t shdr = { nullptr, 0, 0 };
 static mpeg_buffer_t pack = { nullptr, 0, 0 };
 static uint32_t sequence = 0;
@@ -196,14 +191,45 @@ static void prt_msg(const char *msg, ...)
     va_end(va);
 }
 
-int mpeg_demux_t::packetCheck(mpeg_demux_t *mpeg)
+//virtual method
+int mpeg_demux_t::packet_check(mpeg_demux_t *)
 {
-    if (g_opts.packet_max() > 0 && mpeg->_packet.size > g_opts.packet_max())
+    if (g_opts.packet_max() > 0 && _packet.size > g_opts.packet_max())
         return 1;
 
-    if (par_stream[mpeg->_packet.sid] & PAR_STREAM_INVALID)
+    if (par_stream[_packet.sid] & PAR_STREAM_INVALID)
         return 1;
 
+    return 0;
+}
+
+//virtual method
+int mpeg_demux_t::pack(mpeg_demux_t *mpeg)
+{
+    return 0;
+}
+
+//virtual method
+int mpeg_demux_t::packet(mpeg_demux_t *mpeg)
+{
+    return 0;
+}
+
+//virtual method
+int mpeg_demux_t::system_header(mpeg_demux_t *mpeg)
+{
+    return 0;
+}
+
+//virtual method
+int mpeg_demux_t::skip(mpeg_demux_t *mpeg)
+{
+    return 0;
+}
+
+//virtual method
+int mpeg_demux_t::end()
+{
     return 0;
 }
 
@@ -215,9 +241,9 @@ static unsigned mpegd_read(mpeg_demux_t *mpeg, void *buf, unsigned n)
 
     if (i > 0)
     {
-        memcpy (tmp, &mpeg->buf[mpeg->buf_i], i);
+        memcpy(tmp, &mpeg->buf[mpeg->_buf_i], i);
         tmp += i;
-        mpeg->buf_i += i;
+        mpeg->_buf_i += i;
         mpeg->buf_n -= i;
         n -= i;
     }
@@ -225,8 +251,8 @@ static unsigned mpegd_read(mpeg_demux_t *mpeg, void *buf, unsigned n)
     if (n > 0)
         ret += fread(tmp, 1, n, mpeg->_fp);
 
-    mpeg->ofs += ret;
-    return (ret);
+    mpeg->_ofs += ret;
+    return ret;
 }
 
 int mpeg_demux_t::mpeg_buf_read(mpeg_buffer_t *buf, mpeg_demux_t *mpeg, unsigned cnt)
@@ -239,11 +265,6 @@ int mpeg_demux_t::mpeg_buf_read(mpeg_buffer_t *buf, mpeg_demux_t *mpeg, unsigned
     if (buf->cnt != cnt)
         return 1;
 
-    return 0;
-}
-
-int mpeg_demux_t::returnNull(mpeg_demux_t *mpeg)
-{
     return 0;
 }
 
@@ -266,16 +287,8 @@ void mpeg_demux_t::_resetStats()
 
 mpeg_demux_t::mpeg_demux_t(FILE *fp) : _fp(fp)
 {
-    this->ofs = 0;
-    this->buf_i = 0;
     this->buf_n = 0;
     this->ext = NULL;
-    this->mpeg_skip = returnNull;
-    this->mpeg_system_header = returnNull;
-    this->mpeg_packet = returnNull;
-    this->mpeg_packet_check = returnNull;
-    this->mpeg_pack = returnNull;
-    this->mpeg_end = returnNull;
     _resetStats();
 }
 
@@ -289,11 +302,11 @@ static int mpegd_buffer_fill(mpeg_demux_t *mpeg)
 {
     unsigned n;
 
-    if (mpeg->buf_i > 0 && mpeg->buf_n > 0)
+    if (mpeg->_buf_i > 0 && mpeg->buf_n > 0)
         for (unsigned i = 0; i < mpeg->buf_n; i++)
-            mpeg->buf[i] = mpeg->buf[mpeg->buf_i + i];
+            mpeg->buf[i] = mpeg->buf[mpeg->_buf_i + i];
 
-    mpeg->buf_i = 0;
+    mpeg->_buf_i = 0;
     n = MPEG_DEMUX_BUFFER - mpeg->buf_n;
 
     if (n > 0)
@@ -330,7 +343,7 @@ static uint32_t mpegd_get_bits(mpeg_demux_t *mpeg, unsigned i, unsigned n)
     if (mpegd_need_bits(mpeg, i + n))
         return 0;
 
-    uint8_t *buf = mpeg->buf + mpeg->buf_i;
+    uint8_t *buf = mpeg->buf + mpeg->_buf_i;
     uint32_t r = 0;
 
     if (((i | n) & 7) == 0)
@@ -344,7 +357,7 @@ static uint32_t mpegd_get_bits(mpeg_demux_t *mpeg, unsigned i, unsigned n)
             i += 1;
             n -= 1;
         }
-        return (r);
+        return r;
     }
 
     while (n > 0)
@@ -368,17 +381,17 @@ static uint32_t mpegd_get_bits(mpeg_demux_t *mpeg, unsigned i, unsigned n)
 static int mpegd_skip(mpeg_demux_t *mpeg, unsigned n)
 {
     size_t r;
-    mpeg->ofs += n;
+    mpeg->_ofs += n;
 
     if (n <= mpeg->buf_n)
     {
-        mpeg->buf_i += n;
+        mpeg->_buf_i += n;
         mpeg->buf_n -= n;
         return 0;
     }
 
     n -= mpeg->buf_n;
-    mpeg->buf_i = 0;
+    mpeg->_buf_i = 0;
     mpeg->buf_n = 0;
 
     while (n > 0)
@@ -399,11 +412,11 @@ static int mpegd_skip(mpeg_demux_t *mpeg, unsigned n)
 
 static int mpegd_set_offset(mpeg_demux_t *mpeg, uint64_t ofs)
 {
-    if (ofs == mpeg->ofs)
+    if (ofs == mpeg->_ofs)
         return 0;
 
-    if (ofs > mpeg->ofs)
-        return mpegd_skip(mpeg, uint32_t(ofs - mpeg->ofs));
+    if (ofs > mpeg->_ofs)
+        return mpegd_skip(mpeg, uint32_t(ofs - mpeg->_ofs));
 
     return 1;
 }
@@ -414,9 +427,9 @@ static int mpegd_seek_header(mpeg_demux_t *mpeg)
 
     while (mpegd_get_bits(mpeg, 0, 24) != 1)
     {
-        ofs = mpeg->ofs + 1;
+        ofs = mpeg->_ofs + 1;
 
-        if (mpeg->mpeg_skip(mpeg))
+        if (mpeg->skip(mpeg))
             return 1;
 
         if (mpegd_set_offset(mpeg, ofs))
@@ -430,15 +443,14 @@ static int mpegd_seek_header(mpeg_demux_t *mpeg)
 
 static int mpegd_parse_system_header(mpeg_demux_t *mpeg)
 {
-    mpeg->shdr.size = mpegd_get_bits(mpeg, 32, 16) + 6;
-    mpeg->shdr.fixed = mpegd_get_bits(mpeg, 78, 1);
-    mpeg->shdr.csps = mpegd_get_bits(mpeg, 79, 1);
+    mpeg->_shdr.size = mpegd_get_bits(mpeg, 32, 16) + 6;
+    mpeg->_shdr.fixed = mpegd_get_bits(mpeg, 78, 1);
+    mpeg->_shdr.csps = mpegd_get_bits(mpeg, 79, 1);
     mpeg->shdr_cnt += 1;
-    uint64_t ofs = mpeg->ofs + mpeg->shdr.size;
+    uint64_t ofs = mpeg->_ofs + mpeg->_shdr.size;
 
-    if (mpeg->mpeg_system_header != NULL)
-        if (mpeg->mpeg_system_header(mpeg))
-            return 1;
+    if (mpeg->system_header(mpeg))
+        return 1;
 
     mpegd_set_offset (mpeg, ofs);
     return 0;
@@ -578,7 +590,7 @@ static int mpegd_parse_packet(mpeg_demux_t *mpeg)
         mpeg->_packet.ssid = ssid;
     }
 
-    if (mpeg->mpeg_packet_check(mpeg))
+    if (mpeg->packet_check(mpeg))
     {
         if (mpegd_skip(mpeg, 1))
             return 1;
@@ -595,9 +607,9 @@ static int mpegd_parse_packet(mpeg_demux_t *mpeg)
             mpeg->substreams[ssid].size += mpeg->_packet.size - mpeg->_packet.offset;
         }
 
-        ofs = mpeg->ofs + mpeg->_packet.size;
+        ofs = mpeg->_ofs + mpeg->_packet.size;
 
-        if (mpeg->mpeg_packet(mpeg))
+        if (mpeg->packet(mpeg))
             return 1;
 
         mpegd_set_offset(mpeg, ofs);
@@ -636,11 +648,10 @@ static int mpegd_parse_pack(mpeg_demux_t *mpeg)
         mpeg->_pack.size = 4;
     }
 
-    uint64_t ofs = mpeg->ofs + mpeg->_pack.size;
+    uint64_t ofs = mpeg->_ofs + mpeg->_pack.size;
     mpeg->pack_cnt += 1;
 
-    if (mpeg->mpeg_pack != NULL)
-        if (mpeg->mpeg_pack(mpeg))
+    if (mpeg->pack(mpeg))
             return 1;
 
     mpegd_set_offset(mpeg, ofs);
@@ -686,20 +697,19 @@ static int mpegd_parse(mpeg_demux_t *mpeg)
             break;
         case MPEG_END_CODE:
             mpeg->end_cnt += 1;
-            ofs = mpeg->ofs + 4;
+            ofs = mpeg->_ofs + 4;
 
-            if (mpeg->mpeg_end != NULL)
-                if (mpeg->mpeg_end(mpeg))
-                    return 1;
+            if (mpeg->end())
+                return 1;
 
             if (mpegd_set_offset(mpeg, ofs))
                 return 1;
             
             break;
         default:
-            ofs = mpeg->ofs + 1;
+            ofs = mpeg->_ofs + 1;
 
-            if (mpeg->mpeg_skip(mpeg))
+            if (mpeg->skip(mpeg))
                 return 1;
 
             if (mpegd_set_offset(mpeg, ofs))
@@ -733,7 +743,7 @@ int MpegScan::packet(mpeg_demux_t *mpeg)
         return 0;
 
     FILE *fp = mpeg->ext;
-    uint64_t ofs = mpeg->ofs;
+    uint64_t ofs = mpeg->_ofs;
 
     if (mpegd_set_offset(mpeg, ofs + mpeg->_packet.size))
     {
@@ -813,7 +823,7 @@ int MpegScan::end(mpeg_demux_t *mpeg)
     FILE *fp = mpeg->ext;
 
     if (g_opts.no_end() == 0)
-        fprintf(fp, "%08" PRIxMAX ": end code\n", uintmax_t(mpeg->ofs));
+        fprintf(fp, "%08" PRIxMAX ": end code\n", uintmax_t(mpeg->_ofs));
 
     return 0;
 }
@@ -864,9 +874,6 @@ int MpegScan::scan(FILE *inp, FILE *out)
 
 MpegScan::MpegScan(FILE *inp) : mpeg_demux_t(inp)
 {
-    mpeg_packet = this->packet;
-    mpeg_packet_check = this->packetCheck;
-    mpeg_end = this->end;
 }
 
 int Main::mpeg_scan(FILE *inp, FILE *out)
@@ -1211,21 +1218,21 @@ int MpegDemux::packet(mpeg_demux_t *mpeg)
 
     r = 0;
 
-    if (mpeg_buf_read(&::packet, mpeg, cnt))
+    if (mpeg_buf_read(&::g_packet, mpeg, cnt))
     {
         prt_msg("demux: incomplete packet (sid=%02x size=%u/%u)\n",
-            sid, ::packet.cnt, cnt);
+            sid, ::g_packet.cnt, cnt);
 
         if (g_opts.drop())
         {
-            ::packet.clear();
+            ::g_packet.clear();
             return 1;
         }
 
         r = 1;
     }
 
-    if (::packet.write_clear(::fp[fpi]))
+    if (::g_packet.write_clear(::fp[fpi]))
         r = 1;
 
     return r;
@@ -1233,8 +1240,6 @@ int MpegDemux::packet(mpeg_demux_t *mpeg)
 
 MpegDemux::MpegDemux(FILE *fp) : mpeg_demux_t(fp)
 {
-    mpeg_packet = this->packet;
-    mpeg_packet_check = this->packetCheck;
 }
 
 int Main::mpeg_demux(FILE *inp, FILE *out)
@@ -1260,7 +1265,7 @@ void MpegList::mpeg_list_print_skip(FILE *fp)
     if (::g_skip_cnt > 0)
     {
         fprintf(fp, "%08" PRIxMAX ": skip %u\n",
-            uintmax_t(::skip_ofs), ::g_skip_cnt);
+            uintmax_t(::g_skip_ofs), ::g_skip_cnt);
 
         ::g_skip_cnt = 0;
     }
@@ -1269,7 +1274,7 @@ void MpegList::mpeg_list_print_skip(FILE *fp)
 int MpegList::skip(mpeg_demux_t *mpeg)
 {
     if (::g_skip_cnt == 0)
-        ::skip_ofs = mpeg->ofs;
+        ::g_skip_ofs = mpeg->_ofs;
 
     ::g_skip_cnt += 1;
     return 0;
@@ -1285,9 +1290,9 @@ int MpegList::system_header(mpeg_demux_t *mpeg)
 
     fprintf(fp, "%08" PRIxMAX ": system header[%u]: "
         "size=%u fixed=%d csps=%d\n",
-        (uintmax_t)mpeg->ofs,
+        (uintmax_t)mpeg->_ofs,
         mpeg->shdr_cnt - 1,
-        mpeg->shdr.size, mpeg->shdr.fixed, mpeg->shdr.csps);
+        mpeg->_shdr.size, mpeg->_shdr.fixed, mpeg->_shdr.csps);
 
     return 0;
 }
@@ -1307,7 +1312,7 @@ int MpegList::packet(mpeg_demux_t *mpeg)
     mpeg_list_print_skip(fp);
 
     fprintf(fp, "%08" PRIxMAX ": packet[%u]: sid=%02x",
-        uintmax_t(mpeg->ofs), mpeg->streams[sid].packet_cnt - 1, sid);
+        uintmax_t(mpeg->_ofs), mpeg->streams[sid].packet_cnt - 1, sid);
 
     if (sid == 0xbd)
         fprintf (fp, "[%02x]", ssid);
@@ -1346,7 +1351,7 @@ int MpegList::pack(mpeg_demux_t *mpeg)
 
     fprintf(fp, "%08" PRIxMAX ": pack[%u]: "
         "type=%u scr=%" PRIuMAX "[%.4f] mux=%u[%.2f] stuff=%u\n",
-        uintmax_t(mpeg->ofs), mpeg->pack_cnt - 1, mpeg->_pack.type,
+        uintmax_t(mpeg->_ofs), mpeg->pack_cnt - 1, mpeg->_pack.type,
         uintmax_t(mpeg->_pack.scr), double(mpeg->_pack.scr) / 90000.0,
         mpeg->_pack.mux_rate, 50.0 * mpeg->_pack.mux_rate,
         mpeg->_pack.stuff);
@@ -1355,32 +1360,26 @@ int MpegList::pack(mpeg_demux_t *mpeg)
     return 0;
 }
 
-int MpegList::end(mpeg_demux_t *mpeg)
+int MpegList::end()
 {
     if (g_opts.no_end())
         return 0;
 
-    FILE *fp = mpeg->ext;
-    mpeg_list_print_skip (fp);
-    fprintf(fp, "%08" PRIxMAX ": end\n", uintmax_t(mpeg->ofs));
+    FILE *fp = ext;
+    mpeg_list_print_skip(fp);
+    fprintf(fp, "%08" PRIxMAX ": end\n", uintmax_t(_ofs));
     return 0;
 }
 
 MpegList::MpegList(FILE *fp) : mpeg_demux_t(fp)
 {
-    mpeg_skip = this->skip;
-    mpeg_system_header = this->system_header;
-    mpeg_pack = this->pack;
-    mpeg_packet = this->packet;
-    mpeg_packet_check = this->packetCheck;
-    mpeg_end = this->end;
 }
 
 int Main::mpeg_list(FILE *inp, FILE *out)
 {
     MpegList mpeg(inp);
     g_skip_cnt = 0;
-    skip_ofs = 0;
+    g_skip_ofs = 0;
     mpeg.ext = out;
     int r = mpegd_parse(&mpeg);
     MpegList::mpeg_list_print_skip(out);
@@ -1435,7 +1434,7 @@ int MpegRemux::system_header(mpeg_demux_t *mpeg)
     if (::pack.write_clear(mpeg->ext))
         return 1;
 
-    if (mpeg_buf_read(&::shdr, mpeg, mpeg->shdr.size))
+    if (mpeg_buf_read(&::shdr, mpeg, mpeg->_shdr.size))
         return 1;
 
     if (::shdr.write_clear(mpeg->ext))
@@ -1454,32 +1453,32 @@ int MpegRemux::packet(mpeg_demux_t *mpeg)
 
     int r = 0;
 
-    if (mpeg_buf_read(&::packet, mpeg, mpeg->_packet.size))
+    if (mpeg_buf_read(&::g_packet, mpeg, mpeg->_packet.size))
     {
         prt_msg("remux: incomplete packet (sid=%02x size=%u/%u)\n",
-            sid, ::packet.cnt, mpeg->_packet.size);
+            sid, ::g_packet.cnt, mpeg->_packet.size);
 
         if (g_opts.drop())
         {
-            ::packet.clear();
+            ::g_packet.clear();
             return 1;
         }
 
         r = 1;
     }
 
-    if (::packet.cnt >= 4)
+    if (::g_packet.cnt >= 4)
     {
-        ::packet.buf[3] = par_stream_map[sid];
+        ::g_packet.buf[3] = par_stream_map[sid];
 
-        if (sid == 0xbd && ::packet.cnt > mpeg->_packet.offset)
-            ::packet.buf[mpeg->_packet.offset] = par_substream_map[ssid];
+        if (sid == 0xbd && ::g_packet.cnt > mpeg->_packet.offset)
+            ::g_packet.buf[mpeg->_packet.offset] = par_substream_map[ssid];
     }
 
     if (::pack.write_clear(mpeg->ext))
         return 1;
 
-    if (::packet.write_clear(mpeg->ext))
+    if (::g_packet.write_clear(mpeg->ext))
         return 1;
 
     return r;
@@ -1497,16 +1496,16 @@ int MpegRemux::pack(mpeg_demux_t *mpeg)
     return 0;
 }
 
-int MpegRemux::end(mpeg_demux_t *mpeg)
+int MpegRemux::end()
 {
     if (g_opts.no_end())
         return 0;
 
-    if (mpeg_copy(mpeg, mpeg->ext, 4))
+    if (mpeg_copy(this, ext, 4))
         return 1;
 
     if (g_opts.split())
-        if (mpeg_remux_next_fp(mpeg))
+        if (mpeg_remux_next_fp(this))
             return 1;
 
     return 0;
@@ -1514,12 +1513,6 @@ int MpegRemux::end(mpeg_demux_t *mpeg)
 
 MpegRemux::MpegRemux(FILE *fp) : mpeg_demux_t(fp)
 {
-    mpeg_skip = this->skip;
-    mpeg_system_header = this->system_header;
-    mpeg_pack = this->pack;
-    mpeg_packet = this->packet;
-    mpeg_packet_check = this->packetCheck;
-    mpeg_end = this->end;
 }
 
 int Main::mpeg_remux(FILE *inp, FILE *out)
@@ -1541,7 +1534,7 @@ int Main::mpeg_remux(FILE *inp, FILE *out)
 
     ::shdr.init();
     ::pack.init();
-    ::packet.init();
+    ::g_packet.init();
     int r = ::mpegd_parse(&mpeg);
 
     if (g_opts.no_end())
@@ -1563,9 +1556,9 @@ int Main::mpeg_remux(FILE *inp, FILE *out)
     }
 
     mpeg.close();
-    shdr.free();
-    pack.free();
-    packet.free();
+    ::shdr.free();
+    ::pack.free();
+    ::g_packet.free();
     return r;
 }
 
