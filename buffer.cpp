@@ -61,4 +61,19 @@ int mpeg_buffer_t::setCnt(unsigned cnt)
     return 0;
 }
 
+int mpeg_buffer_t::write_clear(FILE *fp)
+{
+    if (cnt > 0)
+    {
+        if (fwrite(buf, 1, cnt, fp) != cnt)
+        {
+            cnt = 0;
+            return 1;
+        }
+    }
+
+    cnt = 0;
+    return 0;
+}
+
 

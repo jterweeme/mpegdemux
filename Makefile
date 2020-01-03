@@ -1,4 +1,4 @@
-CXXFLAGS = -Wall
+CXXFLAGS = -Wall -O2
 
 all: mpegdemux
 

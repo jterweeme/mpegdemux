@@ -2,6 +2,7 @@
 #define BUFFER_H
 
 #include <inttypes.h>
+#include <cstdio>
 
 class mpeg_buffer_t
 {
@@ -14,6 +15,7 @@ public:
     void init();
     void free();
     void clear();
+    int write_clear(FILE *fp);
 };
 
 #endif

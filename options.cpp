@@ -2,6 +2,66 @@
 #include <cstring>
 #include <cstdio>
 
+uint32_t Options::packet_max() const
+{
+    return _packet_max;
+}
+
+void Options::packet_max(uint32_t val)
+{
+    _packet_max = val;
+}
+
+int Options::dvdsub() const
+{
+    return _dvdsub;
+}
+
+void Options::dvdsub(int val)
+{
+    _dvdsub = val;
+}
+
+int Options::first_pts() const
+{
+    return _first_pts;
+}
+
+void Options::first_pts(int val)
+{
+    _first_pts = val;
+}
+
+int Options::empty_pack() const
+{
+    return _empty_pack;
+}
+
+void Options::empty_pack(int val)
+{
+    _empty_pack = val;
+}
+
+int Options::no_end() const
+{
+    return _no_end;
+}
+
+void Options::no_end(int val)
+{
+    _no_end = val;
+}
+
+int Options::no_packet() const
+{
+    return _no_packet;
+}
+
+void Options::no_packet(int val)
+{
+    _no_packet = val;
+}
+
 int Options::no_pack() const
 {
     return _no_pack;

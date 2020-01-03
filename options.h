@@ -19,6 +19,12 @@ struct mpegd_option_t
 class Options
 {
 private:
+    uint32_t _packet_max = 0;
+    int _dvdsub = 0;
+    int _first_pts = 0;
+    int _empty_pack = 0;
+    int _no_end = 0;
+    int _no_packet = 0;
     int _no_pack = 0;
     int _remux_skipped = 0;
     int _no_shdr = 0;
@@ -33,6 +39,18 @@ private:
     mpegd_option_t *_find_option_name2(mpegd_option_t *opt, const char *name2) const;
 public:
     int mpegd_getopt(int argc, char **argv, char ***optarg);
+    uint32_t packet_max() const;
+    void packet_max(uint32_t val);
+    int dvdsub() const;
+    void dvdsub(int val);
+    int first_pts() const;
+    void first_pts(int val);
+    int empty_pack() const;
+    void empty_pack(int val);
+    int no_end() const;
+    void no_end(int val);
+    int no_packet() const;
+    void no_packet(int val);
     int no_pack() const;
     void no_pack(int val);
     int remux_skipped() const;
