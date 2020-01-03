@@ -11,7 +11,10 @@ options.o: options.cpp
 buffer.o: buffer.cpp
 	g++ -c $(CXXFLAGS) $<
 
-mpegdemux: main.o options.o buffer.o
+common.o: common.cpp
+	g++ -c $(CXXFLAGS) $<
+
+mpegdemux: main.o options.o buffer.o common.o
 	g++ -o mpegdemux $^
 
 clean:
