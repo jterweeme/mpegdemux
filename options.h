@@ -38,6 +38,7 @@ private:
     mpegd_option_t *_find_option_name1(mpegd_option_t *opt, int name1) const;
     mpegd_option_t *_find_option_name2(mpegd_option_t *opt, const char *name2) const;
 public:
+    char *_demux_name = nullptr;
     int mpegd_getopt(int argc, char **argv, char ***optarg);
     uint32_t packet_max() const;
     void packet_max(uint32_t val);

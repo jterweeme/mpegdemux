@@ -61,14 +61,14 @@ private:
     int _close = 0;
     int mpegd_seek_header();
     int mpegd_parse_system_header();
-    int mpegd_buffer_fill(mpeg_demux_t *mpeg);
+    int _mpegd_buffer_fill(mpeg_demux_t *mpeg);
     int _mpegd_need_bits(unsigned n);
+    int mpegd_parse_packet1(mpeg_demux_t *mpeg, unsigned i);
+    int mpegd_parse_packet2(mpeg_demux_t *mpeg, unsigned i);
 protected:
     Options *_options;
     char *mpeg_get_name(const char *base, unsigned sid);
-    uint32_t mpegd_get_bits(mpeg_demux_t *mpeg, unsigned i, unsigned n);
-    int mpegd_parse_packet1(mpeg_demux_t *mpeg, unsigned i);
-    int mpegd_parse_packet2(mpeg_demux_t *mpeg, unsigned i);
+    uint32_t mpegd_get_bits(unsigned i, unsigned n);
     int mpegd_skip(mpeg_demux_t *mpeg, unsigned n);
     int mpegd_set_offset(mpeg_demux_t *mpeg, uint64_t ofs);
     int mpegd_parse_packet(mpeg_demux_t *mpeg);
@@ -76,8 +76,8 @@ protected:
     int mpeg_buf_read(mpeg_buffer_t *buf, unsigned cnt);
     int mpeg_copy(mpeg_demux_t *mpeg, FILE *fp, unsigned n);
     int mpeg_stream_excl(uint8_t sid, uint8_t ssid);
-public:
     FILE *_fp;
+public:
     uint64_t _ofs = 0;
     uint32_t _buf_i = 0;
     uint32_t _buf_n = 0;
@@ -85,14 +85,14 @@ public:
     mpeg_shdr_t _shdr;
     mpeg_packet_t _packet;
     mpeg_pack_t _pack;
-    uint32_t shdr_cnt;
-    uint32_t pack_cnt;
-    uint32_t packet_cnt;
-    uint32_t end_cnt;
-    uint32_t skip_cnt;
+    uint32_t _shdr_cnt;
+    uint32_t _pack_cnt;
+    uint32_t _packet_cnt;
+    uint32_t _end_cnt;
+    uint32_t _skip_cnt;
     mpeg_stream_info_t streams[256];
     mpeg_stream_info_t substreams[256];
-    FILE *ext;
+    FILE *_ext;
     int mpegd_parse_pack(mpeg_demux_t *mpeg);
     int parse(mpeg_demux_t *mpeg);
     virtual int pack();
@@ -102,6 +102,7 @@ public:
     virtual int system_header();
     virtual int packet_check(mpeg_demux_t *mpeg);
     mpeg_demux_t(FILE *fp, Options *options);
+    void mpeg_print_stats(mpeg_demux_t *mpeg, FILE *fp);
     void close();
 };
 
@@ -113,22 +114,29 @@ private:
 public:
     MpegDemux(FILE *fp, Options *options);
     int packet() override;
+    int demux(FILE *inp, FILE *out);
 };
 
 class MpegRemux : public mpeg_demux_t
 {
+private:
+    uint32_t _sequence = 0;
+    int mpeg_remux_next_fp(mpeg_demux_t *mpeg);
 public:
     MpegRemux(FILE *fp, Options *options);
-    int mpeg_remux_next_fp(mpeg_demux_t *mpeg);
     int skip() override;
     int pack() override;
     int system_header() override;
     int packet() override;
     int end() override;
+    int remux(FILE *inp, FILE *out);
 };
 
 class MpegScan : public mpeg_demux_t
 {
+private:
+    uint64_t pts1[256];
+    uint64_t pts2[256];
 public:
     MpegScan(FILE *fp, Options *options);
     int packet() override;
@@ -146,6 +154,7 @@ public:
     int system_header() override;
     int packet() override;
     int end() override;
+    int list(FILE *inp, FILE *out);
 };
 
 #endif
