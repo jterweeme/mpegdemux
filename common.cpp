@@ -56,6 +56,334 @@ MpegScan::MpegScan(FILE *inp, Options *options) : mpeg_demux_t(inp, options)
 {
 }
 
+int MpegDemux::demux(FILE *inp, FILE *out)
+{
+    for (unsigned i = 0; i < 512; i++)
+        _fp2[i] = NULL;
+
+    _ext = out;
+    int r = parse(this);
+    close();
+
+    for (unsigned i = 0; i < 512; i++)
+        if (_fp2[i] != NULL && _fp2[i] != out)
+            fclose(_fp2[i]);
+
+    return r;
+}
+
+//virtual method
+int mpeg_demux_t::packet_check(mpeg_demux_t *)
+{
+    if (_options->packet_max() > 0 && _packet.size > _options->packet_max())
+        return 1;
+
+    if (_options->_par_stream[_packet.sid] & PAR_STREAM_INVALID)
+        return 1;
+
+    return 0;
+}
+
+int mpeg_demux_t::mpeg_stream_excl(uint8_t sid, uint8_t ssid)
+{
+    if ((_options->_par_stream[sid] & PAR_STREAM_SELECT) == 0)
+        return 1;
+
+    if (sid == 0xbd)
+        if ((_options->_par_substream[ssid] & PAR_STREAM_SELECT) == 0)
+            return 1;
+
+    return 0;
+}
+
+void MpegList::mpeg_list_print_skip(FILE *fp)
+{
+    if (_skip_cnt2 > 0)
+    {
+        fprintf(fp, "%08" PRIxMAX ": skip %u\n",
+            uintmax_t(_skip_ofs2), _skip_cnt2);
+
+        _skip_cnt2 = 0;
+    }
+}
+
+int MpegList::skip()
+{
+    if (_skip_cnt2 == 0)
+        _skip_ofs2 = _ofs;
+
+    _skip_cnt2 += 1;
+    return 0;
+}
+
+int MpegList::list(FILE *inp, FILE *out)
+{
+    _skip_cnt2 = 0;
+    _skip_ofs2 = 0;
+    _ext = out;
+    int r = parse(this);
+    mpeg_list_print_skip(out);
+    mpeg_print_stats(this, out);
+    close();
+    return r;
+}
+
+int MpegRemux::packet()
+{
+    uint32_t sid = _packet.sid;
+    uint32_t ssid = _packet.ssid;
+
+    if (mpeg_stream_excl(sid, ssid))
+        return 0;
+
+    int r = 0;
+
+    if (mpeg_buf_read(&_packet_buf, _packet.size))
+    {
+        fprintf(stderr, "remux: incomplete packet (sid=%02x size=%u/%u)\n",
+            sid, _packet_buf.cnt, _packet.size);
+
+        if (_options->drop())
+        {
+            _packet_buf.clear();
+            return 1;
+        }
+
+        r = 1;
+    }
+
+    if (_packet_buf.cnt >= 4)
+    {
+        _packet_buf.buf[3] = _options->_par_stream_map[sid];
+
+        if (sid == 0xbd && _packet_buf.cnt > _packet.offset)
+            _packet_buf.buf[_packet.offset] = _options->_par_substream_map[ssid];
+    }
+
+    if (_pack_buf.write_clear(_ext))
+        return 1;
+
+    if (_packet_buf.write_clear(_ext))
+        return 1;
+
+    return r;
+}
+
+int MpegRemux::pack()
+{
+    if (mpeg_buf_read(&_pack_buf, _pack.size))
+        return 1;
+
+    if (_options->empty_pack())
+        if (_pack_buf.write_clear(_ext))
+            return 1;
+
+    return 0;
+}
+
+char *mpeg_demux_t::mpeg_get_name(const char *base, unsigned sid)
+{
+    if (base == NULL)
+        base = "stream_##.dat";
+
+    uint32_t n = 0;
+
+    while (base[n] != 0)
+        n += 1;
+
+    n += 1;
+    char *ret = (char *)malloc(n);
+
+    if (ret == NULL)
+        return (NULL);
+
+    while (n > 0)
+    {
+        n -= 1;
+        ret[n] = base[n];
+
+        if (ret[n] == '#')
+        {
+            uint32_t dig = sid % 16;
+            sid = sid / 16;
+            ret[n] = dig < 10 ? '0' + dig : 'a' + dig - 10;
+        }
+    }
+
+    return ret;
+}
+
+FILE *MpegDemux::mpeg_demux_open(mpeg_demux_t *, unsigned sid, unsigned ssid)
+{
+    FILE *fp;
+
+    if (_options->_demux_name == NULL)
+    {
+        fp = _ext;
+    }
+    else
+    {
+        uint32_t seq = sid == 0xbd ? (sid << 8) + ssid : sid;
+        char *name = mpeg_get_name(_options->_demux_name, seq);
+        fp = fopen(name, "wb");
+
+        if (fp == NULL)
+        {
+            fprintf(stderr, "can't open stream file (%s)\n", name);
+
+            if (sid == 0xbd)
+                _options->_par_substream[ssid] &= ~PAR_STREAM_SELECT;
+            else
+                _options->_par_stream[sid] &= ~PAR_STREAM_SELECT;
+
+            free(name);
+            return NULL;
+        }
+
+        free(name);
+    }
+
+    if (sid == 0xbd && _options->dvdsub())
+    {
+        if (fwrite("SPU ", 1, 4, fp) != 4)
+        {
+            fclose(fp);
+            return NULL;
+        }
+    }
+    
+    return fp;
+}
+
+int MpegDemux::packet()
+{
+    uint32_t sid = _packet.sid;
+    uint32_t ssid = _packet.ssid;
+
+    if (mpeg_stream_excl(sid, ssid))
+        return 0;
+
+    uint32_t cnt = _packet.offset;
+    uint32_t fpi = sid;
+
+    // select substream in private stream 1 (AC3 audio)
+    if (sid == 0xbd)
+    {
+        fpi = 256 + ssid;
+        cnt += 1;
+
+        if (_options->dvdac3())
+            cnt += 3;
+    }
+
+    if (cnt > _packet.size)
+    {
+        fprintf(stderr, "demux: AC3 packet too small (sid=%02x size=%u)\n",
+            sid, _packet.size);
+
+        return 1;
+    }
+
+    if (_fp2[fpi] == NULL)
+    {
+        _fp2[fpi] = mpeg_demux_open(this, sid, ssid);
+
+        if (_fp2[fpi] == NULL)
+            return 1;
+    }
+
+    if (cnt > 0)
+        mpegd_skip(this, cnt);
+
+    cnt = _packet.size - cnt;
+
+    if (sid == 0xbd && _options->dvdsub())
+        return mpeg_demux_copy_spu(this, _fp2[fpi], cnt);
+
+    int r = 0;
+
+    if (mpeg_buf_read(&_packet_buf, cnt))
+    {
+        fprintf(stderr, "demux: incomplete packet (sid=%02x size=%u/%u)\n",
+            sid, _packet_buf.cnt, cnt);
+
+        if (_options->drop())
+        {
+            _packet_buf.clear();
+            return 1;
+        }
+
+        r = 1;
+    }
+
+    if (_packet_buf.write_clear(_fp2[fpi]))
+        r = 1;
+
+    return r;
+}
+
+int MpegRemux::remux(FILE *inp, FILE *out)
+{
+    if (_options->split())
+    {
+        _ext = NULL;
+        _sequence = 0;
+
+        if (mpeg_remux_next_fp(this))
+            return 1;
+    }
+    else
+    {
+        _ext = out;
+    }
+
+    _shdr_buf.init();
+    _pack_buf.init();
+    _packet_buf.init();
+    int r = parse(this);
+
+    if (_options->no_end())
+    {
+        uint8_t buf[4];
+        buf[0] = MPEG_END_CODE >> 24 & 0xff;
+        buf[1] = MPEG_END_CODE >> 16 & 0xff;
+        buf[2] = MPEG_END_CODE >> 8 & 0xff;
+        buf[3] = MPEG_END_CODE & 0xff;
+
+        if (fwrite(buf, 1, 4, _ext) != 4)
+            r = 1;
+    }
+
+    if (_options->split())
+    {
+        fclose(_ext);
+        _ext = NULL;
+    }
+
+    close();
+    _shdr_buf.free();
+    _pack_buf.free();
+    _packet_buf.free();
+    return r;
+}
+
+int MpegRemux::system_header()
+{
+    if (_options->no_shdr() && _shdr_cnt > 1)
+        return 0;
+
+    if (_pack_buf.write_clear(_ext))
+        return 1;
+
+    if (mpeg_buf_read(&_shdr_buf, _shdr.size))
+        return 1;
+
+    if (_shdr_buf.write_clear(_ext))
+        return 1;
+
+    return 0;
+}
+
 int MpegList::system_header()
 {
     if (_options->no_shdr())

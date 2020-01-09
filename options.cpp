@@ -1,6 +1,122 @@
 #include "options.h"
 #include <cstring>
 #include <cstdio>
+#include <cstdlib>
+
+static char *str_clone(const char *str)
+{
+    char *ret = (char *)malloc(strlen(str) + 1);
+
+    if (ret == NULL)
+        return NULL;
+
+    strcpy(ret, str);
+    return ret;
+}
+
+static const char *str_skip_white(const char *str)
+{
+    while (*str == ' ' || *str == '\t')
+        str += 1;
+
+    return str;
+}
+
+static int
+str_get_streams(const char *str, uint8_t stm[256], unsigned msk)
+{
+    char *tmp;
+    unsigned stm1, stm2;
+    int incl = 1;
+
+    while (*str != 0)
+    {
+        str = str_skip_white(str);
+
+        if (*str == '+')
+        {
+            str += 1;
+            incl = 1;
+        }
+        else if (*str == '-')
+        {
+            str += 1;
+            incl = 0;
+        }
+        else
+        {
+            incl = 1;
+        }
+
+        if (strncmp(str, "all", 3) == 0)
+        {
+            str += 3;
+            stm1 = 0;
+            stm2 = 255;
+        }
+        else if (strncmp(str, "none", 4) == 0)
+        {
+            str += 4;
+            stm1 = 0;
+            stm2 = 255;
+            incl = !incl;
+        }
+        else
+        {
+            stm1 = uint32_t(strtoul(str, &tmp, 0));
+
+            if (tmp == str)
+                return 1;
+
+            str = tmp;
+
+            if (*str == '-')
+            {
+                str += 1;
+                stm2 = unsigned(strtoul(str, &tmp, 0));
+
+                if (tmp == str)
+                    return 1;
+
+                str = tmp;
+            }
+            else
+            {
+                stm2 = stm1;
+            }
+        }
+
+        if (incl)
+        {
+            for (unsigned i = stm1; i <= stm2; i++)
+                stm[i] |= msk;
+        }
+        else
+        {
+            for (unsigned i = stm1; i <= stm2; i++)
+                stm[i] &= ~msk;
+        }
+
+        str = str_skip_white(str);
+
+        if (*str == '/')
+            str += 1;
+    }
+
+    return 0;
+}
+
+
+Options::Options()
+{
+    for (uint16_t i = 0; i < 256; i++)
+    {
+        _par_stream[i] = 0;
+        _par_substream[i] = 0;
+        _par_stream_map[i] = i;
+        _par_substream_map[i] = i;
+    }
+}
 
 uint32_t Options::packet_max() const
 {
@@ -278,6 +394,186 @@ int Options::mpegd_getopt(int argc, char **argv, char ***optarg)
     index2 += ret->argcnt;
     curopt += 1;
     return ret->name1;
+}
+
+int Options::parse(int argc, char **argv)
+{
+    char **optarg;
+    
+    while (true)
+    {
+        int r = mpegd_getopt(argc, argv, &optarg);
+
+        if (r == GETOPT_DONE)
+            break;
+
+        if (r < 0)
+            return 1;
+
+        switch (r)
+        {
+        case '?':
+            return 0;
+        case 'a':
+            dvdac3(1);
+            break;
+        case 'b':
+            if (_demux_name != NULL)
+                free(_demux_name);
+
+            _demux_name = str_clone(optarg[0]);
+            break;
+        case 'c':
+            _par_mode = PAR_MODE_SCAN;
+
+            for (unsigned i = 0; i < 256; i++)
+            {
+                _par_stream[i] |= PAR_STREAM_SELECT;
+                _par_substream[i] |= PAR_STREAM_SELECT;
+            }
+            break;
+        case 'd':
+            _par_mode = PAR_MODE_DEMUX;
+            break;
+        case 'D':
+            drop(0);
+            break;
+        case 'e':
+            no_end(1);
+            break;
+        case 'E':
+            empty_pack(1);
+            break;
+        case 'F':
+            first_pts(1);
+            break;
+        case 'h':
+            no_shdr(1);
+            break;
+        case 'i':
+            if (strcmp(optarg[0], "-") == 0)
+            {
+                for (unsigned i = 0; i < 256; i++)
+                {
+                    if (_par_stream[i] & PAR_STREAM_SELECT)
+                        _par_stream[i] &= ~PAR_STREAM_INVALID;
+                    else
+                        _par_stream[i] |= PAR_STREAM_INVALID;
+                }
+            }
+            else
+            {
+                if (str_get_streams(optarg[0], _par_stream, PAR_STREAM_INVALID))
+                {
+                    fprintf(stderr, "%s: bad stream id (%s)\n", argv[0], optarg[0]);
+                    return 1;
+                }
+            }
+            break;
+        case 'k':
+            no_pack(1);
+            break;
+        case 'K':
+            remux_skipped(1);
+            break;
+        case 'l':
+            _par_mode = PAR_MODE_LIST;
+            break;
+        case 'm':
+            packet_max(unsigned(strtoul(optarg[0], NULL, 0)));
+            break;
+        case 'p':
+            if (str_get_streams(optarg[0], _par_substream, PAR_STREAM_SELECT))
+            {
+                fprintf(stderr, "%s: bad substream id (%s)\n", argv[0], optarg[0]);
+                return 1;
+            }
+            break;
+        case 'P':
+        {
+            unsigned id1 = unsigned(strtoul(optarg[0], NULL, 0));
+            unsigned id2 = unsigned(strtoul(optarg[1], NULL, 0));
+            _par_substream_map[id1 & 0xff] = id2 & 0xff;
+        }
+            break;
+        case 'r':
+            _par_mode = PAR_MODE_REMUX;
+            break;
+        case 's':
+            if (str_get_streams(optarg[0], _par_stream, PAR_STREAM_SELECT))
+            {
+                fprintf(stderr, "%s: bad stream id (%s)\n", argv[0], optarg[0]);
+                return 1;
+            }
+            break;
+        case 'S':
+        {
+            unsigned id1 = unsigned(strtoul(optarg[0], NULL, 0));
+            unsigned id2 = unsigned(strtoul(optarg[1], NULL, 0));
+            _par_stream_map[id1 & 0xff] = id2 & 0xff;
+        }
+            break;
+        case 't':
+            no_packet(1);
+            break;
+        case 'u':
+            dvdsub(1);
+            break;
+        case 'V':
+            //print_version();
+            return 0;
+        case 'x':
+            split(1);
+            break;
+        case 0:
+            if (_par_inp == nullptr)
+            {
+                if (strcmp(optarg[0], "-") == 0)
+                    _par_inp = stdin;
+                else
+                    _par_inp = fopen(optarg[0], "rb");
+
+                if (_par_inp == nullptr)
+                {
+                    fprintf(stderr, "%s: can't open input file (%s)\n",
+                                argv[0], optarg[0]);
+
+                    return 1;
+                }
+            }
+            else if (_par_out == nullptr)
+            {
+                if (strcmp(optarg[0], "-") == 0)
+                    _par_out = stdout;
+                else
+                    _par_out = fopen(optarg[0], "wb");
+
+                if (_par_out == NULL)
+                {
+                    fprintf(stderr, "%s: can't open output file (%s)\n",
+                                argv[0], optarg[0]);
+
+                    return 1;
+                }
+            }
+            else
+            {
+                fprintf(stderr, "%s: too many files (%s)\n", argv[0], optarg[0]);
+                return 1;
+            }
+            break;
+        default:
+            return 1;
+        }
+    }
+
+    if (_par_inp == nullptr)
+        _par_inp = stdin;
+
+    if (_par_out == nullptr)
+        _par_out = stdout;
+
+    return 0;
 }
 
 

@@ -1,18 +1,10 @@
 #ifndef COMMON_H
 #define COMMON_H
 
-#include <inttypes.h>
-#include <cstdio>
+#include "buffer.h"
 
-class mpeg_buffer_t;
 class Options;
 
-static constexpr uint8_t PAR_STREAM_SELECT = 0x01;
-static constexpr uint8_t PAR_STREAM_INVALID = 0x02;
-static constexpr uint8_t PAR_MODE_SCAN = 0;
-static constexpr uint8_t PAR_MODE_LIST = 1;
-static constexpr uint8_t PAR_MODE_REMUX = 2;
-static constexpr uint8_t PAR_MODE_DEMUX = 3;
 static constexpr unsigned MPEG_DEMUX_BUFFER = 4096;
 static constexpr uint16_t MPEG_END_CODE = 0x01b9;
 static constexpr uint16_t MPEG_PACK_START = 0x01ba;
@@ -67,6 +59,7 @@ private:
     int mpegd_parse_packet2(mpeg_demux_t *mpeg, unsigned i);
 protected:
     Options *_options;
+    FILE *_fp2[512];
     char *mpeg_get_name(const char *base, unsigned sid);
     uint32_t mpegd_get_bits(unsigned i, unsigned n);
     int mpegd_skip(mpeg_demux_t *mpeg, unsigned n);
@@ -77,6 +70,11 @@ protected:
     int mpeg_copy(mpeg_demux_t *mpeg, FILE *fp, unsigned n);
     int mpeg_stream_excl(uint8_t sid, uint8_t ssid);
     FILE *_fp;
+    mpeg_buffer_t _packet_buf;
+    mpeg_buffer_t _shdr_buf;
+    mpeg_buffer_t _pack_buf;
+    uint64_t _skip_ofs2 = 0;
+    uint32_t _skip_cnt2 = 0;
 public:
     uint64_t _ofs = 0;
     uint32_t _buf_i = 0;
@@ -148,7 +146,7 @@ class MpegList : public mpeg_demux_t
 {
 public:
     MpegList(FILE *fp, Options *options);
-    static void mpeg_list_print_skip(FILE *fp);
+    void mpeg_list_print_skip(FILE *fp);
     int skip() override;
     int pack() override;
     int system_header() override;

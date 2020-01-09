@@ -7,9 +7,9 @@
 class mpeg_buffer_t
 {
 public:
-    uint8_t *buf;
-    uint32_t cnt;
-    uint32_t max;
+    uint8_t *buf = nullptr;
+    uint32_t cnt = 0;
+    uint32_t max = 0;
     int setCnt(unsigned cnt);
     int setMax(unsigned max);
     void init();

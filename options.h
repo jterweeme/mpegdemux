@@ -2,6 +2,7 @@
 #define OPTIONS_H
 
 #include <inttypes.h>
+#include <cstdio>
 
 #define GETOPT_DONE    -1
 #define GETOPT_UNKNOWN -2
@@ -15,6 +16,13 @@ struct mpegd_option_t
     const char *argdesc;
     const char *optdesc;
 };
+
+static constexpr uint8_t PAR_STREAM_SELECT = 0x01;
+static constexpr uint8_t PAR_STREAM_INVALID = 0x02;
+static constexpr uint8_t PAR_MODE_SCAN = 0;
+static constexpr uint8_t PAR_MODE_LIST = 1;
+static constexpr uint8_t PAR_MODE_REMUX = 2;
+static constexpr uint8_t PAR_MODE_DEMUX = 3;
 
 class Options
 {
@@ -38,6 +46,14 @@ private:
     mpegd_option_t *_find_option_name1(mpegd_option_t *opt, int name1) const;
     mpegd_option_t *_find_option_name2(mpegd_option_t *opt, const char *name2) const;
 public:
+    Options();
+    FILE *_par_inp = nullptr;
+    FILE *_par_out = nullptr;
+    uint8_t _par_mode = PAR_MODE_SCAN;
+    uint8_t _par_stream[256];
+    uint8_t _par_substream[256];
+    uint8_t _par_stream_map[256];
+    uint8_t _par_substream_map[256];
     char *_demux_name = nullptr;
     int mpegd_getopt(int argc, char **argv, char ***optarg);
     uint32_t packet_max() const;
@@ -64,6 +80,7 @@ public:
     void dvdac3(int val);
     int drop() const;
     void drop(int val);
+    int parse(int argc, char **argv);
 };
 
 #endif
